@@ -316,10 +316,32 @@ function App() {
       socket.emit('update_rpc', savedRpc);
       const savedPlatform = localStorage.getItem('as_platform') || 'vr';
       socket.emit('set_platform', { platform: savedPlatform });
+
+      // Sunucu yeniden başladığında tarayıcıdaki kayıtlı tokenları otomatik geri yükle
+      try {
+        const savedTokensRaw = localStorage.getItem('dragon_cloud_tokens');
+        if (savedTokensRaw) {
+          const parsedTokens = JSON.parse(savedTokensRaw);
+          if (Array.isArray(parsedTokens) && parsedTokens.length > 0) {
+            socket.emit('add_tokens', { tokens: parsedTokens });
+          }
+        }
+      } catch(e) {}
     });
     socket.on('disconnect', () => setConnected(false));
     socket.on('state_update', (data) => {
       setAccounts(data.accounts || []);
+      
+      // Gelen geçerli hesapları tarayıcı hafızasına güvenle kaydet
+      if (Array.isArray(data.accounts) && data.accounts.length > 0) {
+        try {
+          const validTokens = data.accounts.map(a => a.token).filter(Boolean);
+          if (validTokens.length > 0) {
+            localStorage.setItem('dragon_cloud_tokens', JSON.stringify(validTokens));
+          }
+        } catch(e) {}
+      }
+
       setGlobalTrackingTarget(data.globalTarget || null);
       if (data.platform) {
         setPlatform(data.platform);
@@ -1286,11 +1308,19 @@ function App() {
 
   const handleRemoveToken = (token) => {
     socket.emit('remove_token', { token });
+    try {
+      const raw = localStorage.getItem('dragon_cloud_tokens');
+      if (raw) {
+        const list = JSON.parse(raw).filter(t => t !== token && t.trim() !== token.trim());
+        localStorage.setItem('dragon_cloud_tokens', JSON.stringify(list));
+      }
+    } catch(e) {}
     setAccounts(prev => prev.filter(a => a.token !== token));
   };
 
   const handleJoinVoiceAll = async () => {
     if (!channelId || accounts.length === 0) return;
+    localStorage.setItem('dragon_saved_channel_id', channelId.trim());
     
     // Trigger user interaction for AudioContext (production fix)
     try {
