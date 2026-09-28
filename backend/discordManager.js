@@ -1270,9 +1270,20 @@ function setupSocket(io) {
     socket.on('remove_token', ({ token }) => {
       if (clients.has(token)) {
         const data = clients.get(token);
+        data._stopping = true;
+        data.manualDisconnected = true;
+        if (data.subscription) { try { data.subscription.unsubscribe(); } catch(e){} }
         if (data.mediaFfmpeg) { try { data.mediaFfmpeg.kill('SIGKILL'); } catch(e){} }
-        if (data.connection) data.connection.destroy();
-        data.client.destroy();
+        if (data.connection) { try { data.connection.destroy(); } catch(e){} }
+        if (data.client) {
+          try {
+            sendGatewayPacket(data.client, {
+              op: 4,
+              d: { guild_id: null, channel_id: null, self_mute: false, self_deaf: false }
+            });
+            data.client.destroy();
+          } catch(e){}
+        }
         clients.delete(token);
         updateAllRPC();
         broadcastState();
@@ -1549,25 +1560,19 @@ function setupSocket(io) {
       clients.forEach(data => {
         data.selfMute = !!selfMute;
         data.selfDeaf = !!selfDeaf;
-        if (data.connection && data.client && data.client.guilds) {
-          const config = data.connection.joinConfig;
-          if (config && config.guildId && config.channelId) {
-            const guild = data.client.guilds.cache.get(config.guildId);
-            if (guild && guild.shard) {
-              try {
-                guild.shard.send({
-                  op: 4,
-                  d: {
-                    guild_id: config.guildId,
-                    channel_id: config.channelId,
-                    self_mute: !!selfMute,
-                    self_deaf: !!selfDeaf,
-                    self_video: !!data.cameraActive
-                  }
-                });
-              } catch(e) {}
+        const voiceInfo = getAccountVoiceInfo(data);
+        if (voiceInfo && voiceInfo.channelId && data.client) {
+          const payload = {
+            op: 4,
+            d: {
+              guild_id: voiceInfo.guildId || null,
+              channel_id: voiceInfo.channelId,
+              self_mute: !!selfMute,
+              self_deaf: !!selfDeaf,
+              self_video: !!data.cameraActive
             }
-          }
+          };
+          sendGatewayPacket(data.client, payload);
         }
       });
       broadcastState();
@@ -1802,6 +1807,8 @@ function saveVoiceConfig(channelId, options) {
 
 // ── 24/7 VOICE KEEPALIVE & AUTO-RECONNECT WATCHDOG ───────────────────────────
 let voiceWatchdogTimer = null;
+// ── 24/7 VOICE KEEPALIVE & AUTO-RECONNECT WATCHDOG ───────────────────────────
+let voiceWatchdogTimer = null;
 function startVoiceWatchdog() {
   if (voiceWatchdogTimer) return;
   voiceWatchdogTimer = setInterval(async () => {
@@ -1809,9 +1816,10 @@ function startVoiceWatchdog() {
 
     for (const [token, data] of clients.entries()) {
       if (data.status !== 'connected' || !data.client) continue;
+      if (data.manualDisconnected || data._stopping) continue;
 
       const inVoice = !!data.connection && data.connection.state.status === VoiceConnectionStatus.Ready;
-      if (!inVoice && !data._stopping) {
+      if (!inVoice) {
         console.log(`[24/7 Watchdog] Reconnecting ${data.user?.username || token.slice(0, 8)} to channel ${savedAutoVoiceChannelId}...`);
         try {
           await joinVoiceSingle(token, savedAutoVoiceChannelId, savedVoiceOptions);
@@ -1829,6 +1837,9 @@ async function joinVoiceSwarm(channelId, options) {
 
   for (const [token, data] of clients.entries()) {
     if (data.status !== 'connected') continue;
+    data._stopping = false;
+    data.manualDisconnected = false;
+
     try {
       const channel = await data.client.channels.fetch(channelId).catch(() => null);
       if (!channel) continue;
@@ -1849,7 +1860,7 @@ async function joinVoiceSwarm(channelId, options) {
         channelId: channel.id,
         guildId: guildId,
         adapterCreator: adapterCreator,
-        selfDeaf: false, // ses gönderebilmek için her zaman false
+        selfDeaf: !!options.selfDeaf,
         selfMute: !!options.selfMute,
         group: data.client.user.id
       });
@@ -1881,9 +1892,9 @@ async function joinVoiceSwarm(channelId, options) {
           broadcastState();
 
           // 24/7 Otomatik tekrar bağlanma
-          if (savedAutoVoiceChannelId && !data._stopping) {
+          if (savedAutoVoiceChannelId && !data._stopping && !data.manualDisconnected) {
             setTimeout(() => {
-              if (savedAutoVoiceChannelId && !data.connection) {
+              if (savedAutoVoiceChannelId && !data.connection && !data.manualDisconnected) {
                 joinVoiceSingle(data.token, savedAutoVoiceChannelId, savedVoiceOptions);
               }
             }, 2500);
@@ -1902,6 +1913,7 @@ function disconnectVoiceSwarm() {
 
   clients.forEach(data => {
     data._stopping = true;
+    data.manualDisconnected = true;
     if (data.subscription) {
       try { data.subscription.unsubscribe(); } catch(e) {}
       data.subscription = null;
@@ -1920,8 +1932,18 @@ function disconnectVoiceSwarm() {
       data.mediaStatus = 'stopped';
     }
     data.inVoice = false;
-    setTimeout(() => { data._stopping = false; }, 300);
+    data.cameraActive = false;
+    data.streamActive = false;
+
+    // Discord Gateway'den ses kanalından anında çıkar
+    if (data.client) {
+      sendGatewayPacket(data.client, {
+        op: 4,
+        d: { guild_id: null, channel_id: null, self_mute: false, self_deaf: false, self_video: false }
+      });
+    }
   });
+
   if (sharedFfmpeg) { try { sharedFfmpeg.kill(); } catch(e){} sharedFfmpeg = null; sharedInput = null; }
   if (globalFileFfmpeg) {
     try { globalFileFfmpeg.kill('SIGKILL'); } catch(e) {}
@@ -1941,6 +1963,8 @@ async function joinVoiceSingle(token, channelId, options = {}) {
   if (!clients.has(token)) return;
   const data = clients.get(token);
   if (data.status !== 'connected') return;
+  data._stopping = false;
+  data.manualDisconnected = false;
 
   try {
     const channel = await data.client.channels.fetch(channelId).catch(() => null);
@@ -1967,7 +1991,7 @@ async function joinVoiceSingle(token, channelId, options = {}) {
       channelId: channel.id,
       guildId: guildId,
       adapterCreator: adapterCreator,
-      selfDeaf: false,
+      selfDeaf: !!options.selfDeaf,
       selfMute: !!options.selfMute,
       group: data.client.user.id
     });
@@ -2009,6 +2033,9 @@ async function joinVoiceSingle(token, channelId, options = {}) {
 function disconnectVoiceSingle(token) {
   if (!clients.has(token)) return;
   const data = clients.get(token);
+  data._stopping = true;
+  data.manualDisconnected = true;
+  if (data.subscription) { try { data.subscription.unsubscribe(); } catch(e){} data.subscription = null; }
   if (data.player) { try { data.player.stop(true); } catch(e){} }
   if (data.connection) { try { data.connection.destroy(); } catch(e){} data.connection = null; }
   if (data.mediaFfmpeg) {
@@ -2016,7 +2043,18 @@ function disconnectVoiceSingle(token) {
     data.mediaFfmpeg = null;
     data.mediaStatus = 'stopped';
   }
+  data.inVoice = false;
   data.cameraActive = false;
+  data.streamActive = false;
+
+  // Discord Gateway'den ses kanalından çıkar
+  if (data.client) {
+    sendGatewayPacket(data.client, {
+      op: 4,
+      d: { guild_id: null, channel_id: null, self_mute: false, self_deaf: false, self_video: false }
+    });
+  }
+
   updateAllRPC();
   broadcastState();
 }
