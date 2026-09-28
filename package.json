@@ -1,0 +1,70 @@
+{
+  "name": "dragon-service",
+  "version": "1.0.0",
+  "description": "Dragon Service - Discord Multi-Account Voice Client",
+  "main": "main.js",
+  "author": "Dragon Service",
+  "private": true,
+  "scripts": {
+    "start": "npm run build-frontend && electron .",
+    "server": "node backend/server.js",
+    "build-frontend": "cd frontend && npm run build",
+    "dist": "npm run build-frontend && electron-builder --win --x64",
+    "dist-portable": "npm run build-frontend && electron-builder --win portable"
+  },
+  "build": {
+    "appId": "com.dragonservice.app",
+    "productName": "Dragon Service",
+    "directories": {
+      "output": "dist-exe"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.ico"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "frontend/dist/**/*",
+      "backend/**/*",
+      "assets/**/*",
+      "node_modules/**/*",
+      "!node_modules/.bin",
+      "!**/node_modules/*/{CHANGELOG.md,README.md,README,readme.md,readme}",
+      "!**/node_modules/*/{test,__tests__,tests,powered-test,example,examples}",
+      "!**/node_modules/.bin",
+      "!**/*.{iml,o,hprof,orig,pyc,pyo,rbc,swp,csproj,sln,xproj}",
+      "!**/._*"
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "**/node_modules/ffmpeg-static/**/*"
+    ]
+  },
+  "dependencies": {
+    "@discordjs/voice": "^0.19.2",
+    "cors": "^2.8.5",
+    "discord.js-selfbot-v13": "^3.3.3",
+    "express": "^4.18.2",
+    "ffmpeg-static": "^5.2.0",
+    "koffi": "^2.15.4",
+    "libsodium-wrappers": "^0.7.13",
+    "opusscript": "^0.0.8",
+    "socket.io": "^4.8.1",
+    "tweetnacl": "^1.0.3"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
