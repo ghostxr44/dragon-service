@@ -1256,7 +1256,7 @@ function setupSocket(io) {
     });
 
     socket.on('add_token', async ({ token }) => {
-      const cleanToken = token.replace(/^["']|["']$/g, '').trim();
+      const cleanToken = token ? token.replace(/^["']|["']$/g, '').trim() : '';
       if (!cleanToken) return;
       const existing = clients.get(cleanToken);
       if (existing && existing.status !== 'error') {
@@ -1283,6 +1283,8 @@ function setupSocket(io) {
         }
         await connectClient(cleanToken);
         addedCount++;
+        // Small delay between token connections to avoid Discord Gateway rate limit
+        await new Promise(r => setTimeout(r, 600));
       }
       saveTokens();
       if (addedCount > 0) {
@@ -1301,8 +1303,24 @@ function setupSocket(io) {
     });
 
     socket.on('remove_token', ({ token }) => {
-      if (clients.has(token)) {
-        const data = clients.get(token);
+      const targetToken = token ? token.replace(/^["']|["']$/g, '').trim() : '';
+      let targetKey = null;
+
+      if (clients.has(targetToken)) {
+        targetKey = targetToken;
+      } else if (clients.has(token)) {
+        targetKey = token;
+      } else {
+        for (const key of clients.keys()) {
+          if (key.trim() === targetToken || key === token) {
+            targetKey = key;
+            break;
+          }
+        }
+      }
+
+      if (targetKey && clients.has(targetKey)) {
+        const data = clients.get(targetKey);
         data._stopping = true;
         data.manualDisconnected = true;
         if (data.subscription) { try { data.subscription.unsubscribe(); } catch(e){} }
@@ -1317,10 +1335,11 @@ function setupSocket(io) {
             data.client.destroy();
           } catch(e){}
         }
-        clients.delete(token);
+        clients.delete(targetKey);
         updateAllRPC();
         broadcastState();
         saveTokens();
+        console.log(`[Token] Removed token: ${targetKey.slice(0, 10)}... Remaining: ${clients.size}`);
       }
     });
 
@@ -1735,7 +1754,7 @@ async function connectClient(token) {
     };
     saveTokens();
     if (!cachedDragonLogoCdnUrl) {
-      ensureDragonLogoUploaded(client);
+      resolveDragonAsset(client).then(() => updateAllRPC()).catch(() => {});
     }
     updateAllRPC();
     broadcastState();
