@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: dragon-service
+    env: node
+    region: frankfurt
+    plan: free
+    buildCommand: "cd frontend && npm install && npm run build && cd .. && npm install"
+    startCommand: "node backend/server.js"
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        fromPort: 3001
+    healthCheckPath: /ping
