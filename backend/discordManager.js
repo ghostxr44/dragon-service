@@ -1019,49 +1019,74 @@ function setupAudioForClient(data) {
 let cachedDragonLogoCdnUrl = null;
 let isUploadingLogo = false;
 const DRAGON_LOGO_EXTERNAL = 'https://sc.filehippo.net/images/t_app-icon-l/p/0a8c2472-4872-4eea-a29c-2c72d8f3564e/3501283247/msi-dragon-center-logo';
+const RPC_APP_ID = '383226320970055681'; // VS Code Registered Discord Snowflake Application
 
-async function ensureDragonLogoUploaded(client) {
-  if (cachedDragonLogoCdnUrl || isUploadingLogo || !client || !client.user) return cachedDragonLogoCdnUrl;
+async function resolveDragonAsset(client) {
+  if (cachedDragonLogoCdnUrl) return cachedDragonLogoCdnUrl;
+  if (isUploadingLogo || !client || !client.user || !client.token) return null;
   isUploadingLogo = true;
+
+  try {
+    // 1. Discord External Asset Proxy API
+    if (typeof RichPresence.getExternal === 'function') {
+      const externalRes = await RichPresence.getExternal(client, RPC_APP_ID, DRAGON_LOGO_EXTERNAL).catch(() => null);
+      if (externalRes && Array.isArray(externalRes) && externalRes[0] && externalRes[0].external_asset_path) {
+        cachedDragonLogoCdnUrl = externalRes[0].external_asset_path;
+        console.log('[RPC] Dragon logo external asset proxy resolved:', cachedDragonLogoCdnUrl);
+        isUploadingLogo = false;
+        return cachedDragonLogoCdnUrl;
+      }
+    }
+  } catch (e) {
+    console.warn('[RPC] getExternal warning:', e.message);
+  }
+
+  // 2. Fallback: Upload logo to a cached channel if available
   try {
     const candidatePaths = [
       path.join(__dirname, '../assets/dragon_rpc.png'),
-      path.join(__dirname, '../assets/logo.png'),
       path.join(__dirname, 'dragon_rpc.png'),
-      path.join(__dirname, 'logo.png'),
       path.join(process.cwd(), 'assets/dragon_rpc.png'),
-      path.join(process.cwd(), 'assets/logo.png'),
-      path.join(process.cwd(), 'frontend/public/logo.png')
+      path.join(process.cwd(), 'frontend/public/dragon_rpc.png')
     ];
     const logoPath = candidatePaths.find(p => fs.existsSync(p));
     if (logoPath) {
-      const dm = await client.user.createDM();
-      const msg = await dm.send({
-        files: [{ attachment: logoPath, name: 'dragon_service.png' }]
-      });
-      if (msg && msg.attachments && msg.attachments.size > 0) {
-        cachedDragonLogoCdnUrl = msg.attachments.first().url;
-        console.log('[RPC] Dragon logo uploaded to Discord CDN successfully:', cachedDragonLogoCdnUrl);
-        updateAllRPC();
+      // Find any accessible channel to upload attachment
+      const textChannel = client.channels?.cache?.find(ch => ch.isText?.() && ch.permissionsFor?.(client.user)?.has?.('ATTACH_FILES'));
+      if (textChannel) {
+        const msg = await textChannel.send({
+          files: [{ attachment: logoPath, name: 'dragon_logo.png' }]
+        }).catch(() => null);
+        if (msg && msg.attachments && msg.attachments.first()) {
+          cachedDragonLogoCdnUrl = msg.attachments.first().url;
+          console.log('[RPC] Uploaded dragon logo to Discord channel CDN:', cachedDragonLogoCdnUrl);
+          isUploadingLogo = false;
+          return cachedDragonLogoCdnUrl;
+        }
       }
     }
-  } catch (err) {
-    console.warn('[RPC] Note: Auto-upload logo to DM skipped:', err.message);
-    // Fallback: use external URL via mp:external format
-    cachedDragonLogoCdnUrl = `mp:external/${DRAGON_LOGO_EXTERNAL.replace('https://', '')}`;
-    console.log('[RPC] Using external URL fallback for logo');
-  } finally {
-    isUploadingLogo = false;
-  }
+  } catch(e) {}
+
+  isUploadingLogo = false;
   return cachedDragonLogoCdnUrl;
 }
 
-function updateAllRPC() {
+async function updateAllRPC() {
   const inVoiceCount = Array.from(clients.values()).filter(c => c.connection).length;
   if (inVoiceCount > 0 && !globalVoiceStartTime) {
     globalVoiceStartTime = Date.now();
   } else if (inVoiceCount === 0) {
     globalVoiceStartTime = null;
+  }
+
+  // Resolve logo asset if not cached yet
+  if (!cachedDragonLogoCdnUrl) {
+    for (const c of clients.values()) {
+      if (c.status === 'connected' && c.client && c.client.user) {
+        await resolveDragonAsset(c.client);
+        if (cachedDragonLogoCdnUrl) break;
+      }
+    }
   }
 
   clients.forEach((c) => {
@@ -1073,8 +1098,9 @@ function updateAllRPC() {
         }
 
         const rpc = new RichPresence(c.client)
-          .setName(customRPC.name || 'Dragon Service')
-          .setType(customRPC.type || 'PLAYING');
+          .setName(customRPC.name || 'Dragon')
+          .setType(customRPC.type || 'PLAYING')
+          .setApplicationId(RPC_APP_ID);
 
         const detailsText = customRPC.details !== undefined && customRPC.details !== ''
           ? customRPC.details
@@ -1087,20 +1113,15 @@ function updateAllRPC() {
         if (detailsText) rpc.setDetails(detailsText);
         if (stateText) rpc.setState(stateText);
 
-        // RPC Image: önce kullanıcının girdiği, sonra CDN'e yüklenen, son olarak harici URL
-        let largeImg = (customRPC.largeImage && customRPC.largeImage.trim()) || cachedDragonLogoCdnUrl;
-        if (!largeImg) {
-          // Henüz CDN'e yüklenmemişse harici URL formatını kullan
-          largeImg = `mp:external/${DRAGON_LOGO_EXTERNAL.replace('https://', '')}`;
-        }
-        if (largeImg) {
+        const imgToSet = cachedDragonLogoCdnUrl || customRPC.largeImage;
+        if (imgToSet && (imgToSet.startsWith('mp:') || imgToSet.startsWith('http:') || imgToSet.startsWith('https:'))) {
           try {
-            rpc.setAssetsLargeImage(largeImg.trim());
+            rpc.setAssetsLargeImage(imgToSet);
           } catch(e) {}
         }
 
         try {
-          rpc.setAssetsLargeText(customRPC.name || 'Dragon Service');
+          rpc.setAssetsLargeText(customRPC.name || 'Dragon');
         } catch(e) {}
 
         if (globalVoiceStartTime) rpc.setStartTimestamp(globalVoiceStartTime);
