@@ -277,7 +277,7 @@ function App() {
   });
   const [rpcDetails, setRpcDetails] = useState(() => localStorage.getItem('as_rpcDetails') || '');
   const [rpcState, setRpcState] = useState(() => localStorage.getItem('as_rpcState') || '');
-  const [rpcImage, setRpcImage] = useState(() => localStorage.getItem('as_rpcImage') || '');
+  const [rpcImage, setRpcImage] = useState(() => localStorage.getItem('as_rpcImage') || 'https://sc.filehippo.net/images/t_app-icon-l/p/0a8c2472-4872-4eea-a29c-2c72d8f3564e/3501283247/msi-dragon-center-logo');
   const [rpcType, setRpcType] = useState(() => localStorage.getItem('as_rpcType') || 'PLAYING');
   const [rpcSavedNotice, setRpcSavedNotice] = useState(false);
   const [platform, setPlatform] = useState(() => localStorage.getItem('as_platform') || 'vr');
