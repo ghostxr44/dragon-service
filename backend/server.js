@@ -12,6 +12,7 @@ process.on('unhandledRejection', (reason, promise) => {
 
 const express = require('express');
 const http = require('http');
+const https = require('https');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const path = require('path');
@@ -65,18 +66,24 @@ const PORT = process.env.PORT || 3001;
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`[Dragon Service] 24/7 Cloud & Local Server listening on port ${PORT}`);
   
-  // Render.com Free Tier 7/24 Uyanık Tutucu (Self-Keepalive Pinger)
+  // ── Render.com Free Tier 7/24 Uyanık Tutucu (Self-Keepalive Pinger) ─────────
   const externalUrl = process.env.RENDER_EXTERNAL_URL || process.env.APP_URL;
-  if (externalUrl) {
-    console.log(`[Keepalive] 24/7 Cloud URL detected: ${externalUrl}`);
-    setInterval(() => {
+  
+  setInterval(() => {
+    // 1. External HTTPS/HTTP Ping
+    if (externalUrl) {
       try {
         const pingUrl = externalUrl.endsWith('/') ? `${externalUrl}ping` : `${externalUrl}/ping`;
-        http.get(pingUrl, (res) => {
-          // Keepalive ping sent
+        const client = pingUrl.startsWith('https') ? https : http;
+        client.get(pingUrl, (res) => {
+          // Keepalive ping success
         }).on('error', () => {});
       } catch(e) {}
-    }, 4 * 60 * 1000); // 4 dakikada bir ping atarak uyumasını engeller
-  }
-});
+    }
 
+    // 2. Internal Localhost Ping
+    try {
+      http.get(`http://127.0.0.1:${PORT}/ping`, () => {}).on('error', () => {});
+    } catch(e) {}
+  }, 2.5 * 60 * 1000); // 2.5 dakikada bir ping atarak uyumasını engeller
+});
