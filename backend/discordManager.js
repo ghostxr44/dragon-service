@@ -1018,14 +1018,18 @@ function setupAudioForClient(data) {
 
 let cachedDragonLogoCdnUrl = null;
 let isUploadingLogo = false;
+const DRAGON_LOGO_EXTERNAL = 'https://sc.filehippo.net/images/t_app-icon-l/p/0a8c2472-4872-4eea-a29c-2c72d8f3564e/3501283247/msi-dragon-center-logo';
 
 async function ensureDragonLogoUploaded(client) {
   if (cachedDragonLogoCdnUrl || isUploadingLogo || !client || !client.user) return cachedDragonLogoCdnUrl;
   isUploadingLogo = true;
   try {
     const candidatePaths = [
+      path.join(__dirname, '../assets/dragon_rpc.png'),
       path.join(__dirname, '../assets/logo.png'),
+      path.join(__dirname, 'dragon_rpc.png'),
       path.join(__dirname, 'logo.png'),
+      path.join(process.cwd(), 'assets/dragon_rpc.png'),
       path.join(process.cwd(), 'assets/logo.png'),
       path.join(process.cwd(), 'frontend/public/logo.png')
     ];
@@ -1043,6 +1047,9 @@ async function ensureDragonLogoUploaded(client) {
     }
   } catch (err) {
     console.warn('[RPC] Note: Auto-upload logo to DM skipped:', err.message);
+    // Fallback: use external URL via mp:external format
+    cachedDragonLogoCdnUrl = `mp:external/${DRAGON_LOGO_EXTERNAL.replace('https://', '')}`;
+    console.log('[RPC] Using external URL fallback for logo');
   } finally {
     isUploadingLogo = false;
   }
@@ -1080,7 +1087,12 @@ function updateAllRPC() {
         if (detailsText) rpc.setDetails(detailsText);
         if (stateText) rpc.setState(stateText);
 
-        const largeImg = (customRPC.largeImage && customRPC.largeImage.trim()) || cachedDragonLogoCdnUrl;
+        // RPC Image: önce kullanıcının girdiği, sonra CDN'e yüklenen, son olarak harici URL
+        let largeImg = (customRPC.largeImage && customRPC.largeImage.trim()) || cachedDragonLogoCdnUrl;
+        if (!largeImg) {
+          // Henüz CDN'e yüklenmemişse harici URL formatını kullan
+          largeImg = `mp:external/${DRAGON_LOGO_EXTERNAL.replace('https://', '')}`;
+        }
         if (largeImg) {
           try {
             rpc.setAssetsLargeImage(largeImg.trim());
