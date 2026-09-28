@@ -1256,6 +1256,7 @@ function App() {
 
   const handleDisconnectSingleVoice = (token) => {
     socket.emit('disconnect_voice_account', { token });
+    setAccounts(prev => prev.map(a => a.token === token ? { ...a, inVoice: false } : a));
   };
 
   const handleApplyRPC = () => {
@@ -1283,7 +1284,10 @@ function App() {
     }
   };
 
-  const handleRemoveToken = (token) => socket.emit('remove_token', { token });
+  const handleRemoveToken = (token) => {
+    socket.emit('remove_token', { token });
+    setAccounts(prev => prev.filter(a => a.token !== token));
+  };
 
   const handleJoinVoiceAll = async () => {
     if (!channelId || accounts.length === 0) return;
@@ -1305,6 +1309,7 @@ function App() {
 
   const handleDisconnectVoiceAll = () => {
     socket.emit('disconnect_voice_all');
+    setAccounts(prev => prev.map(a => ({ ...a, inVoice: false })));
     stopRecording();
   };
 
@@ -3514,11 +3519,19 @@ function App() {
                 </div>
 
                 <div className="toggles-row">
-                  <div className={`toggle-pill${selfMute ? ' active' : ''}`} onClick={() => setSelfMute(p => !p)}>
+                  <div className={`toggle-pill${selfMute ? ' active' : ''}`} onClick={() => {
+                    const nextMute = !selfMute;
+                    setSelfMute(nextMute);
+                    socket.emit('update_voice_states', { selfDeaf, selfMute: nextMute });
+                  }}>
                     {selfMute ? <MicOff size={14} /> : <Mic size={14} />}
                     {selfMute ? 'Muted' : 'Unmuted'}
                   </div>
-                  <div className={`toggle-pill${selfDeaf ? ' active' : ''}`} onClick={() => setSelfDeaf(p => !p)}>
+                  <div className={`toggle-pill${selfDeaf ? ' active' : ''}`} onClick={() => {
+                    const nextDeaf = !selfDeaf;
+                    setSelfDeaf(nextDeaf);
+                    socket.emit('update_voice_states', { selfDeaf: nextDeaf, selfMute });
+                  }}>
                     <Headphones size={14} />
                     {selfDeaf ? 'Deafened' : 'Undeafened'}
                   </div>
