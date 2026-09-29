@@ -1859,26 +1859,36 @@ function saveVoiceConfig(channelId, options) {
 
 // ── 24/7 VOICE KEEPALIVE & AUTO-RECONNECT WATCHDOG ───────────────────────────
 let voiceWatchdogTimer = null;
-// ── 24/7 VOICE KEEPALIVE & AUTO-RECONNECT WATCHDOG ───────────────────────────
-let voiceWatchdogTimer = null;
 function startVoiceWatchdog() {
   if (voiceWatchdogTimer) return;
   voiceWatchdogTimer = setInterval(async () => {
     if (!savedAutoVoiceChannelId) return;
 
     for (const [token, data] of clients.entries()) {
-      if (data.status !== 'connected' || !data.client) continue;
       if (data.manualDisconnected || data._stopping) continue;
+
+      // Rate-limit veya ağ kopması durumunda hesabı tekrar bağla
+      if (data.status === 'error' || !data.client) {
+        try {
+          console.log(`[24/7 Watchdog] Re-logging in account ${data.user?.username || token.slice(0, 8)}...`);
+          await connectClient(token);
+          await new Promise(r => setTimeout(r, 1000));
+        } catch(e) {}
+        continue;
+      }
+
+      if (data.status !== 'connected') continue;
 
       const inVoice = !!data.connection && data.connection.state.status === VoiceConnectionStatus.Ready;
       if (!inVoice) {
         console.log(`[24/7 Watchdog] Reconnecting ${data.user?.username || token.slice(0, 8)} to channel ${savedAutoVoiceChannelId}...`);
         try {
           await joinVoiceSingle(token, savedAutoVoiceChannelId, savedVoiceOptions);
+          await new Promise(r => setTimeout(r, 600));
         } catch(e) {}
       }
     }
-  }, 8000);
+  }, 10000);
 }
 
 async function joinVoiceSwarm(channelId, options) {
@@ -1888,7 +1898,7 @@ async function joinVoiceSwarm(channelId, options) {
   startVoiceWatchdog();
 
   for (const [token, data] of clients.entries()) {
-    if (data.status !== 'connected') continue;
+    if (data.status !== 'connected' || !data.client) continue;
     data._stopping = false;
     data.manualDisconnected = false;
 
@@ -1953,6 +1963,9 @@ async function joinVoiceSwarm(channelId, options) {
           }
         }
       });
+
+      // Discord Gateway ses kanalı rate-limit koruması
+      await new Promise(r => setTimeout(r, 600));
     } catch (e) { console.error('Join error:', e.message); }
   }
   updateAllRPC();
@@ -2325,7 +2338,7 @@ function broadcastState() {
   });
 }
 
-function loadTokens() {
+async function loadTokens() {
   const filePath = getTokensFilePath();
   const fallbackPath = path.join(__dirname, 'tokens.json');
   let targetPath = filePath;
@@ -2336,11 +2349,12 @@ function loadTokens() {
     try {
       const tokens = JSON.parse(fs.readFileSync(targetPath, 'utf-8'));
       if (Array.isArray(tokens)) {
-        tokens.forEach(t => {
+        for (const t of tokens) {
           if (t && typeof t === 'string' && t.trim()) {
-            connectClient(t.trim());
+            await connectClient(t.trim());
+            await new Promise(r => setTimeout(r, 800));
           }
-        });
+        }
       }
     } catch (e) {}
   }
