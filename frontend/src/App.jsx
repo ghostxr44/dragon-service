@@ -1318,6 +1318,15 @@ function App() {
     setAccounts(prev => prev.filter(a => a.token !== token));
   };
 
+  const handleClearAllTokens = () => {
+    if (accounts.length === 0) return;
+    if (window.confirm('Tüm hesapları ve tokenları kaldırmak istediğinize emin misiniz?')) {
+      socket.emit('clear_all_tokens');
+      localStorage.removeItem('dragon_cloud_tokens');
+      setAccounts([]);
+    }
+  };
+
   const handleJoinVoiceAll = async () => {
     if (!channelId || accounts.length === 0) return;
     localStorage.setItem('dragon_saved_channel_id', channelId.trim());
@@ -2989,6 +2998,29 @@ function App() {
                       >
                         <Trash2 size={12} />
                         Geçersizleri Temizle ({accounts.filter(a => a.status === 'error' || a.error).length})
+                      </button>
+                    )}
+                    {accounts.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={handleClearAllTokens}
+                        style={{
+                          padding: '3px 8px',
+                          fontSize: '0.68rem',
+                          fontWeight: 700,
+                          borderRadius: 6,
+                          cursor: 'pointer',
+                          background: 'rgba(255, 255, 255, 0.05)',
+                          color: 'var(--text-3)',
+                          border: '1px solid rgba(255, 255, 255, 0.1)',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 4
+                        }}
+                        title="Tüm hesapları ve tokenları listeden tamamen sil"
+                      >
+                        <Trash2 size={12} />
+                        Tümünü Sil
                       </button>
                     )}
                     <span style={{ background:'rgba(255,255,255,0.08)', padding:'2px 8px', borderRadius:10, fontSize:'0.7rem', fontWeight:700, color:'var(--text-3)' }}>
