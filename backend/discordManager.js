@@ -1762,13 +1762,46 @@ async function connectClient(token) {
 
   client.on('error', (err) => {
     console.error(`[Account ${cleanToken.slice(0, 8)}...] error:`, err.message);
-    data.status = 'error';
-    let friendly = err.message;
+    // Geçersiz token değilse status'u error yapmıyoruz, reconnect denesin
     if (err.message.includes('TOKEN_INVALID') || err.message.includes('invalid token') || err.message.includes('401')) {
-      friendly = 'Geçersiz / Patlak Token (401 Unauthorized)';
+      data.status = 'error';
+      data.error = 'Geçersiz / Patlak Token (401 Unauthorized)';
+      broadcastState();
     }
-    data.error = friendly;
+  });
+
+  // ── Gateway kapatılınca otomatik tekrar bağlan ────────────────────────────
+  client.ws.on('INVALIDATED', async () => {
+    if (data._stopping || data.manualDisconnected) return;
+    console.log(`[AutoReconnect] Session INVALIDATED for ${data.user?.username || cleanToken.slice(0,8)} — re-logging in...`);
+    data.status = 'connecting';
+    data.connection = null;
     broadcastState();
+    await new Promise(r => setTimeout(r, 3000));
+    if (!data._stopping && !data.manualDisconnected) {
+      clients.delete(cleanToken);
+      await connectClient(cleanToken);
+    }
+  });
+
+  client.on('shardDisconnect', async (event, shardId) => {
+    if (data._stopping || data.manualDisconnected) return;
+    // 4004=bad auth, 4014=disallowed intents — bu hataları yeniden bağlanma
+    const noReconnectCodes = [4004, 4010, 4011, 4012, 4013, 4014];
+    if (noReconnectCodes.includes(event?.code)) {
+      console.log(`[AutoReconnect] Fatal close code ${event?.code} for ${cleanToken.slice(0,8)} — not reconnecting`);
+      data.status = 'error';
+      data.error = `Discord bağlantısı kesildi (Kod: ${event?.code})`;
+      broadcastState();
+      return;
+    }
+    console.log(`[AutoReconnect] Shard disconnected (code ${event?.code}) for ${data.user?.username || cleanToken.slice(0,8)} — reconnecting in 5s...`);
+    data.status = 'connecting';
+    broadcastState();
+    await new Promise(r => setTimeout(r, 5000));
+    if (!data._stopping && !data.manualDisconnected) {
+      // discord.js-selfbot kendi reconnect ediyor, sadece watchdog devreye girer
+    }
   });
 
   client.on('voiceStateUpdate', (oldS, newS) => {
@@ -1791,6 +1824,17 @@ async function connectClient(token) {
           type: 'error',
           message: `[${cleanToken.slice(0, 10)}...] Geçersiz / Patlak Token! Giriş başarısız.`
         });
+      }
+    } else {
+      // Login hatası geçici olabilir — 10 sn sonra tekrar dene
+      if (!data._stopping && !data.manualDisconnected) {
+        console.log(`[AutoReconnect] Login error for ${cleanToken.slice(0,8)}, retrying in 10s...`);
+        setTimeout(async () => {
+          if (!data._stopping && !data.manualDisconnected) {
+            clients.delete(cleanToken);
+            await connectClient(cleanToken);
+          }
+        }, 10000);
       }
     }
     data.error = friendly;
@@ -1859,36 +1903,76 @@ function saveVoiceConfig(channelId, options) {
 
 // ── 24/7 VOICE KEEPALIVE & AUTO-RECONNECT WATCHDOG ───────────────────────────
 let voiceWatchdogTimer = null;
+const clientConnectingAt = new Map(); // token -> timestamp when it started 'connecting'
+
 function startVoiceWatchdog() {
   if (voiceWatchdogTimer) return;
   voiceWatchdogTimer = setInterval(async () => {
-    if (!savedAutoVoiceChannelId) return;
-
     for (const [token, data] of clients.entries()) {
       if (data.manualDisconnected || data._stopping) continue;
 
-      // Rate-limit veya ağ kopması durumunda hesabı tekrar bağla
-      if (data.status === 'error' || !data.client) {
-        try {
-          console.log(`[24/7 Watchdog] Re-logging in account ${data.user?.username || token.slice(0, 8)}...`);
-          await connectClient(token);
-          await new Promise(r => setTimeout(r, 1000));
-        } catch(e) {}
+      // ── 1. Discord Gateway / Online Status Watchdog ────────────────────────
+      if (data.status === 'error') {
+        // Geçersiz token değilse yeniden bağlan
+        if (data.error && (data.error.includes('Geçersiz') || data.error.includes('401'))) continue;
+        console.log(`[Watchdog] Re-logging in errored account ${token.slice(0, 8)}...`);
+        clients.delete(token);
+        try { await connectClient(token); } catch(e) {}
+        await new Promise(r => setTimeout(r, 1500));
         continue;
       }
 
+      // 'connecting' durumunda 60 saniyeden fazla kaldıysa stuck — yeniden başlat
+      if (data.status === 'connecting') {
+        const startedAt = clientConnectingAt.get(token);
+        if (!startedAt) {
+          clientConnectingAt.set(token, Date.now());
+        } else if (Date.now() - startedAt > 60000) {
+          console.log(`[Watchdog] Account ${token.slice(0,8)} stuck in 'connecting' for 60s — restarting...`);
+          clientConnectingAt.delete(token);
+          if (data.client) { try { data.client.destroy(); } catch(e){} }
+          clients.delete(token);
+          try { await connectClient(token); } catch(e) {}
+          await new Promise(r => setTimeout(r, 1500));
+        }
+        continue;
+      } else {
+        clientConnectingAt.delete(token);
+      }
+
+      // ── 2. Discord'a online olarak kendini göster (status keepalive) ────────
+      if (data.status === 'connected' && data.client && data.client.user) {
+        try {
+          // Her döngüde status paketi göndererek Discord'un hesabı offline düşürmesini engelle
+          const presencePayload = {
+            op: 3,
+            d: {
+              since: null,
+              activities: [],
+              status: 'online',
+              afk: false
+            }
+          };
+          if (data.client.ws && data.client.ws.shards && data.client.ws.shards.size > 0) {
+            data.client.ws.shards.first()?.send?.(presencePayload);
+          }
+        } catch(e) {}
+      }
+
+      // ── 3. Voice Channel Watchdog ──────────────────────────────────────────
+      if (!savedAutoVoiceChannelId) continue;
       if (data.status !== 'connected') continue;
 
       const inVoice = !!data.connection && data.connection.state.status === VoiceConnectionStatus.Ready;
       if (!inVoice) {
-        console.log(`[24/7 Watchdog] Reconnecting ${data.user?.username || token.slice(0, 8)} to channel ${savedAutoVoiceChannelId}...`);
+        console.log(`[Watchdog] Reconnecting ${data.user?.username || token.slice(0, 8)} to voice channel ${savedAutoVoiceChannelId}...`);
         try {
           await joinVoiceSingle(token, savedAutoVoiceChannelId, savedVoiceOptions);
           await new Promise(r => setTimeout(r, 600));
         } catch(e) {}
       }
     }
-  }, 10000);
+  }, 15000); // Her 15 saniyede kontrol et
 }
 
 async function joinVoiceSwarm(channelId, options) {
@@ -2372,12 +2456,15 @@ loadTokens();
 loadVoiceConfig();
 startMasterClock();
 
-// 24/7 Sunucu: Tokenlar yüklendikten ~15 saniye sonra kaydedilmiş kanala otomatik katıl
+// Watchdog'u hemen başlat (ses kanalına katılmadan önce de online/gateway koruması aktif olsun)
+startVoiceWatchdog();
+
+// 24/7 Sunucu: Tokenlar yüklendikten ~20 saniye sonra kaydedilmiş kanala otomatik katıl
 setTimeout(async () => {
   if (savedAutoVoiceChannelId && clients.size > 0) {
     console.log(`[24/7 Auto-Join] Reconnecting all accounts to saved channel: ${savedAutoVoiceChannelId}`);
     await joinVoiceSwarm(savedAutoVoiceChannelId, savedVoiceOptions);
   }
-}, 15000);
+}, 20000);
 
 module.exports = { setupSocket };
