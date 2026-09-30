@@ -1370,6 +1370,34 @@ function setupSocket(io) {
       }
     });
 
+    socket.on('clear_all_tokens', () => {
+      for (const [token, data] of clients.entries()) {
+        data._stopping = true;
+        data.manualDisconnected = true;
+        if (data.subscription) { try { data.subscription.unsubscribe(); } catch(e){} }
+        if (data.mediaFfmpeg) { try { data.mediaFfmpeg.kill('SIGKILL'); } catch(e){} }
+        if (data.connection) { try { data.connection.destroy(); } catch(e){} }
+        if (data.client) {
+          try {
+            sendGatewayPacket(data.client, {
+              op: 4,
+              d: { guild_id: null, channel_id: null, self_mute: false, self_deaf: false }
+            });
+            data.client.destroy();
+          } catch(e){}
+        }
+      }
+      clients.clear();
+      updateAllRPC();
+      broadcastState();
+      saveTokens();
+      socket.emit('token_feedback', {
+        type: 'success',
+        message: 'Tüm hesaplar ve tokenlar başarıyla temizlendi!'
+      });
+      console.log('[Token] All accounts and tokens cleared.');
+    });
+
     socket.on('play_global_file', ({ filePath, volumeDb, loop, seekSeconds, pitch, reverb, bass, hz, dominance, clarity, normalVolume, is8D, speed8D, eq }) => {
       startGlobalFileStream(
         filePath, volumeDb, loop, seekSeconds || 0,
