@@ -1018,7 +1018,7 @@ function setupAudioForClient(data) {
 
 let cachedDragonLogoCdnUrl = null;
 let isUploadingLogo = false;
-const DRAGON_LOGO_EXTERNAL = 'https://sc.filehippo.net/images/t_app-icon-l/p/0a8c2472-4872-4eea-a29c-2c72d8f3564e/3501283247/msi-dragon-center-logo';
+const DRAGON_LOGO_EXTERNAL = 'https://raw.githubusercontent.com/ghostxr44/dragon-service/main/assets/dragon_rpc.png';
 const RPC_APP_ID = '383226320970055681'; // VS Code Registered Discord Snowflake Application
 
 async function resolveDragonAsset(client) {
@@ -1027,12 +1027,12 @@ async function resolveDragonAsset(client) {
   isUploadingLogo = true;
 
   try {
-    // 1. Discord External Asset Proxy API
+    // 1. Discord External Asset Proxy API via GitHub Hosted Image
     if (typeof RichPresence.getExternal === 'function') {
       const externalRes = await RichPresence.getExternal(client, RPC_APP_ID, DRAGON_LOGO_EXTERNAL).catch(() => null);
       if (externalRes && Array.isArray(externalRes) && externalRes[0] && externalRes[0].external_asset_path) {
         cachedDragonLogoCdnUrl = externalRes[0].external_asset_path;
-        console.log('[RPC] Dragon logo external asset proxy resolved:', cachedDragonLogoCdnUrl);
+        console.log('[RPC] Dragon logo external asset proxy resolved successfully:', cachedDragonLogoCdnUrl);
         isUploadingLogo = false;
         return cachedDragonLogoCdnUrl;
       }
@@ -1041,7 +1041,7 @@ async function resolveDragonAsset(client) {
     console.warn('[RPC] getExternal warning:', e.message);
   }
 
-  // 2. Fallback: Upload logo to a cached channel if available
+  // 2. Fallback: Upload logo to an accessible text channel if available
   try {
     const candidatePaths = [
       path.join(__dirname, '../assets/dragon_rpc.png'),
@@ -1051,7 +1051,6 @@ async function resolveDragonAsset(client) {
     ];
     const logoPath = candidatePaths.find(p => fs.existsSync(p));
     if (logoPath) {
-      // Find any accessible channel to upload attachment
       const textChannel = client.channels?.cache?.find(ch => ch.isText?.() && ch.permissionsFor?.(client.user)?.has?.('ATTACH_FILES'));
       if (textChannel) {
         const msg = await textChannel.send({
@@ -1114,7 +1113,7 @@ async function updateAllRPC() {
         if (stateText) rpc.setState(stateText);
 
         const imgToSet = cachedDragonLogoCdnUrl || customRPC.largeImage;
-        if (imgToSet && (imgToSet.startsWith('mp:') || imgToSet.startsWith('http:') || imgToSet.startsWith('https:'))) {
+        if (imgToSet) {
           try {
             rpc.setAssetsLargeImage(imgToSet);
           } catch(e) {}
@@ -1968,21 +1967,25 @@ function startVoiceWatchdog() {
         clientConnectingAt.delete(token);
       }
 
-      // ── 2. Discord'a online olarak kendini göster (status keepalive) ────────
+      // ── 2. Discord'a online olarak kendini göster & RPC koru ─────────────────
       if (data.status === 'connected' && data.client && data.client.user) {
         try {
-          // Her döngüde status paketi göndererek Discord'un hesabı offline düşürmesini engelle
-          const presencePayload = {
-            op: 3,
-            d: {
-              since: null,
-              activities: [],
-              status: 'online',
-              afk: false
+          if (customRPC && customRPC.enabled) {
+            // RPC aktivitesini koru ve canlı tut (silinmesini engeller)
+            updateAllRPC();
+          } else {
+            const presencePayload = {
+              op: 3,
+              d: {
+                since: null,
+                activities: [],
+                status: 'online',
+                afk: false
+              }
+            };
+            if (data.client.ws && data.client.ws.shards && data.client.ws.shards.size > 0) {
+              data.client.ws.shards.first()?.send?.(presencePayload);
             }
-          };
-          if (data.client.ws && data.client.ws.shards && data.client.ws.shards.size > 0) {
-            data.client.ws.shards.first()?.send?.(presencePayload);
           }
         } catch(e) {}
       }
