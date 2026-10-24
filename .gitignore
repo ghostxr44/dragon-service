@@ -1,0 +1,12 @@
+node_modules/
+dist-exe/
+dist/
+.git/
+*.log
+*.env
+tokens.json
+tokens*.json
+backend/tokens.json
+backend/tokens*.json
+dragon_cdn_cache.json
+voice_config.json

@@ -26,6 +26,7 @@ const { Readable, PassThrough } = require('stream');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 let ffmpegPath = require('ffmpeg-static');
 if (typeof ffmpegPath === 'string') {
   ffmpegPath = ffmpegPath.replace('app.asar', 'app.asar.unpacked');
@@ -98,10 +99,14 @@ function getWsProperties(platform) {
 
 let customRPC = {
   enabled: true,
-  name: 'Dragon Service',
-  details: '',
-  state: '',
-  type: 'PLAYING'
+  name: 'Dragon.',
+  details: '7/24 Online.',
+  state: 'Burası Şimdilik Sessiz.',
+  type: 'PLAYING',
+  largeImage: '',
+  timeMode: 'auto', // 'auto' | 'custom' | 'off'
+  customHours: 0,
+  customMinutes: 0
 };
 
 // Merkezi ffmpeg decoder — tek process, tüm clientlara aynı anda PCM dağıtır
@@ -207,8 +212,8 @@ let masterClockTimer = null;
 
 function makePcmStream() {
   startMasterClock();
-  // 1ms ultra-düşük gecikmeli tampon (zero-latency flush)
-  const pt = new PassThrough({ highWaterMark: 1024 * 8 });
+  // 128 KB pürüzsüz tampon — sıfır jitter ve kesintisiz akıcı müzik
+  const pt = new PassThrough({ highWaterMark: 1024 * 128 });
   pt.on('error', () => {});
   return pt;
 }
@@ -596,12 +601,9 @@ function restartGlobalFfmpegWithFilters(seekSeconds = 0) {
 
   const filters = buildGlobalAudioFilters();
   const args = [
-    '-probesize', '32',
-    '-analyzeduration', '0',
-    '-fflags', 'nobuffer+fastseek+flush_packets',
+    '-fflags', '+nobuffer+fastseek+flush_packets',
     '-flags', 'low_delay',
     '-threads', '4',
-    '-re',
     ...(globalFileLoop ? ['-stream_loop', '-1'] : []),
     ...(seekSeconds > 0 ? ['-ss', String(seekSeconds)] : []),
     '-i', globalFilePath,
@@ -713,7 +715,7 @@ function stopGlobalFileStream() {
   globalFilePath = null;
   globalFileDuration = 0;
 
-  // Bireysel ve paylaşımlı tüm medya akışlarını anında sonlandır
+  // Bireysel medya akışlarını durdur
   clients.forEach(c => {
     if (c.mediaFfmpeg) {
       try { c.mediaFfmpeg.kill('SIGKILL'); } catch(e){}
@@ -725,20 +727,26 @@ function stopGlobalFileStream() {
     }
   });
 
-  // Master oynatıcıyı anında tamamen durdur ve sessizliğe al
+  // Mevcut stream'e 200ms sessizlik bas, tamamen temizle
   try {
-    masterAudioPlayer.stop(true);
+    if (masterPcmStream && !masterPcmStream.destroyed && !masterPcmStream.writableEnded) {
+      masterPcmStream.write(Buffer.alloc(FRAME_BYTES * 5)); // 100ms sessizlik
+    }
   } catch(e) {}
 
-  // Stream'i anında sıfırla
+  // Master oynatıcıyı durdur
+  try { masterAudioPlayer.stop(true); } catch(e) {}
+
+  // Stream'i sıfırla ve mikrofon için hazır tut
   try {
     if (masterPcmStream && !masterPcmStream.destroyed) {
       masterPcmStream.removeAllListeners();
       masterPcmStream.destroy();
     }
   } catch(e) {}
-  masterPcmStream = null;
-  masterAudioResource = null;
+  masterPcmStream = makePcmStream();
+  masterAudioResource = createAudioResource(masterPcmStream, { inputType: StreamType.Raw, inlineVolume: false });
+  masterAudioPlayer.play(masterAudioResource);
 
   if (ioInstance) {
     ioInstance.emit('media_time_update', { currentTime: 0, duration: 0, playing: false });
@@ -769,7 +777,28 @@ function startGlobalFileStream(filePath, volumeDb = 0, loop = false, seekSeconds
     }
   });
 
-  globalFilePath = filePath;
+  // Dosyanın diskte varlığını kontrol et
+  let actualFilePath = filePath;
+  if (!actualFilePath || !fs.existsSync(actualFilePath)) {
+    // Temp medya klasöründe ara
+    const tempCandidate = path.join(os.tmpdir(), 'dragon_service_media', path.basename(filePath || ''));
+    if (fs.existsSync(tempCandidate)) {
+      actualFilePath = tempCandidate;
+    } else {
+      console.error('[Media] File does not exist on disk:', filePath);
+      if (ioInstance) {
+        ioInstance.emit('token_feedback', {
+          type: 'error',
+          message: `Müzik dosyası bulunamadı: ${path.basename(filePath || 'Dosya')}`
+        });
+        ioInstance.emit('media_time_update', { currentTime: 0, duration: 0, playing: false });
+      }
+      broadcastState();
+      return;
+    }
+  }
+
+  globalFilePath = actualFilePath;
   globalFileVolumeDb = Number(volumeDb) || 0;
   if (normalVolume !== undefined) globalFileNormalVolume = Math.max(0, Math.min(1.0, Number(normalVolume)));
   if (is8D !== undefined) globalFile8D = !!is8D;
@@ -786,7 +815,7 @@ function startGlobalFileStream(filePath, volumeDb = 0, loop = false, seekSeconds
   globalFileStartTime = Date.now() - (seekSeconds * 1000);
 
   // Non-blocking duration retrieval (starts playback in <20ms instead of waiting 2s!)
-  getMediaDuration(filePath).then(dur => {
+  getMediaDuration(actualFilePath).then(dur => {
     globalFileDuration = dur;
     if (ioInstance) {
       ioInstance.emit('media_time_update', {
@@ -809,15 +838,12 @@ function startGlobalFileStream(filePath, volumeDb = 0, loop = false, seekSeconds
   const filters = buildGlobalAudioFilters();
 
   const args = [
-    '-probesize', '32',
-    '-analyzeduration', '0',
-    '-fflags', 'nobuffer+fastseek+flush_packets',
+    '-fflags', '+nobuffer+fastseek+flush_packets',
     '-flags', 'low_delay',
     '-threads', '4',
-    '-re',
     ...(loop ? ['-stream_loop', '-1'] : []),
     ...(seekSeconds > 0 ? ['-ss', String(seekSeconds)] : []),
-    '-i', filePath,
+    '-i', actualFilePath,
     ...(filters.length > 0 ? ['-filter:a', filters.join(',')] : []),
     '-acodec', 'pcm_s16le',
     '-ar', '48000',
@@ -826,7 +852,7 @@ function startGlobalFileStream(filePath, volumeDb = 0, loop = false, seekSeconds
     'pipe:1'
   ];
 
-  console.log('[Media] Starting global file stream instantly:', filePath, 'pitch:', globalFilePitch, 'bass:', globalFileBass, 'dominance:', globalFileDominance, 'vol:', globalFileVolumeDb, 'normVol:', globalFileNormalVolume, '8D:', globalFile8D);
+  console.log('[Media] Starting global file stream instantly:', actualFilePath, 'pitch:', globalFilePitch, 'bass:', globalFileBass, 'dominance:', globalFileDominance, 'vol:', globalFileVolumeDb, 'normVol:', globalFileNormalVolume, '8D:', globalFile8D);
 
   try {
     globalFileFfmpeg = spawn(ffmpegPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -1021,53 +1047,180 @@ let isUploadingLogo = false;
 const DRAGON_LOGO_EXTERNAL = 'https://raw.githubusercontent.com/ghostxr44/dragon-service/main/assets/dragon_rpc.png';
 const RPC_APP_ID = '383226320970055681'; // VS Code Registered Discord Snowflake Application
 
+function getCdnCachePath() {
+  return path.join(process.env.USER_DATA_PATH || __dirname, 'dragon_cdn_cache.json');
+}
+
+function loadCachedDragonCdn() {
+  try {
+    const p = getCdnCachePath();
+    if (fs.existsSync(p)) {
+      const data = JSON.parse(fs.readFileSync(p, 'utf-8'));
+      if (data && data.url) {
+        cachedDragonLogoCdnUrl = data.url;
+        console.log('[RPC] Loaded cached Dragon CDN URL from disk:', cachedDragonLogoCdnUrl);
+      }
+    }
+  } catch(e) {}
+}
+
+function saveCachedDragonCdn(url) {
+  try {
+    cachedDragonLogoCdnUrl = url;
+    const p = getCdnCachePath();
+    fs.writeFileSync(p, JSON.stringify({ url, updatedAt: new Date().toISOString() }, null, 2));
+  } catch(e) {}
+}
+
+loadCachedDragonCdn();
+
 async function resolveDragonAsset(client) {
   if (cachedDragonLogoCdnUrl) return cachedDragonLogoCdnUrl;
   if (isUploadingLogo || !client || !client.user || !client.token) return null;
   isUploadingLogo = true;
 
+  // 1. Önce diskteli dosya yolunu veya GitHub'dan buffer'ı hazırla
+  let fileBuffer = null;
+  const candidatePaths = [
+    path.join(__dirname, '../assets/dragon_rpc.png'),
+    path.join(__dirname, 'dragon_rpc.png'),
+    path.join(process.cwd(), 'assets/dragon_rpc.png'),
+    path.join(process.cwd(), 'frontend/public/dragon_rpc.png')
+  ];
+  const foundLocalPath = candidatePaths.find(p => fs.existsSync(p));
+  if (foundLocalPath) {
+    try { fileBuffer = fs.readFileSync(foundLocalPath); } catch(e) {}
+  }
+
+  if (!fileBuffer) {
+    try {
+      const res = await fetch(DRAGON_LOGO_EXTERNAL).catch(() => null);
+      if (res && res.ok) {
+        const arrBuf = await res.arrayBuffer();
+        fileBuffer = Buffer.from(arrBuf);
+        console.log('[RPC] Downloaded dragon_rpc.png from GitHub buffer successfully.');
+      }
+    } catch(e) {}
+  }
+
+  // 2. Client'ın kendi DM kanalına (Direct Message) yükle — en güvenilir, izin gerektirmeyen yöntem
+  if (fileBuffer) {
+    try {
+      const dmChannel = await client.user.createDM().catch(() => null);
+      if (dmChannel) {
+        const msg = await dmChannel.send({
+          files: [{ attachment: fileBuffer, name: 'dragon_rpc.png' }]
+        }).catch(() => null);
+        if (msg && msg.attachments && msg.attachments.first()) {
+          const uploadedUrl = msg.attachments.first().url;
+          saveCachedDragonCdn(uploadedUrl);
+          console.log('[RPC] Successfully uploaded Dragon logo to user DM CDN:', uploadedUrl);
+          isUploadingLogo = false;
+          return uploadedUrl;
+        }
+      }
+    } catch(e) {
+      console.warn('[RPC] DM upload warning:', e.message);
+    }
+
+    // 3. DM olmadıysa herhangi bir erişilebilir metin kanalına yüklemeyi dene
+    try {
+      const textChannel = client.channels?.cache?.find(ch => ch.isText?.() && ch.permissionsFor?.(client.user)?.has?.('ATTACH_FILES'));
+      if (textChannel) {
+        const msg = await textChannel.send({
+          files: [{ attachment: fileBuffer, name: 'dragon_rpc.png' }]
+        }).catch(() => null);
+        if (msg && msg.attachments && msg.attachments.first()) {
+          const uploadedUrl = msg.attachments.first().url;
+          saveCachedDragonCdn(uploadedUrl);
+          console.log('[RPC] Successfully uploaded Dragon logo to TextChannel CDN:', uploadedUrl);
+          isUploadingLogo = false;
+          return uploadedUrl;
+        }
+      }
+    } catch(e) {}
+  }
+
+  // 4. Son çare: Discord External Proxy API
   try {
-    // 1. Discord External Asset Proxy API via GitHub Hosted Image
     if (typeof RichPresence.getExternal === 'function') {
       const externalRes = await RichPresence.getExternal(client, RPC_APP_ID, DRAGON_LOGO_EXTERNAL).catch(() => null);
       if (externalRes && Array.isArray(externalRes) && externalRes[0] && externalRes[0].external_asset_path) {
-        cachedDragonLogoCdnUrl = externalRes[0].external_asset_path;
-        console.log('[RPC] Dragon logo external asset proxy resolved successfully:', cachedDragonLogoCdnUrl);
+        saveCachedDragonCdn(externalRes[0].external_asset_path);
+        console.log('[RPC] Dragon logo external asset proxy resolved:', cachedDragonLogoCdnUrl);
         isUploadingLogo = false;
         return cachedDragonLogoCdnUrl;
       }
     }
-  } catch (e) {
-    console.warn('[RPC] getExternal warning:', e.message);
-  }
-
-  // 2. Fallback: Upload logo to an accessible text channel if available
-  try {
-    const candidatePaths = [
-      path.join(__dirname, '../assets/dragon_rpc.png'),
-      path.join(__dirname, 'dragon_rpc.png'),
-      path.join(process.cwd(), 'assets/dragon_rpc.png'),
-      path.join(process.cwd(), 'frontend/public/dragon_rpc.png')
-    ];
-    const logoPath = candidatePaths.find(p => fs.existsSync(p));
-    if (logoPath) {
-      const textChannel = client.channels?.cache?.find(ch => ch.isText?.() && ch.permissionsFor?.(client.user)?.has?.('ATTACH_FILES'));
-      if (textChannel) {
-        const msg = await textChannel.send({
-          files: [{ attachment: logoPath, name: 'dragon_logo.png' }]
-        }).catch(() => null);
-        if (msg && msg.attachments && msg.attachments.first()) {
-          cachedDragonLogoCdnUrl = msg.attachments.first().url;
-          console.log('[RPC] Uploaded dragon logo to Discord channel CDN:', cachedDragonLogoCdnUrl);
-          isUploadingLogo = false;
-          return cachedDragonLogoCdnUrl;
-        }
-      }
-    }
-  } catch(e) {}
+  } catch (e) {}
 
   isUploadingLogo = false;
   return cachedDragonLogoCdnUrl;
+}
+
+function getRpcTimestamp() {
+  if (customRPC.timeMode === 'off') {
+    return null;
+  }
+  if (customRPC.timeMode === 'custom') {
+    const hours = Number(customRPC.customHours) || 0;
+    const minutes = Number(customRPC.customMinutes) || 0;
+    const totalMs = (hours * 3600 + minutes * 60) * 1000;
+    return Date.now() - totalMs;
+  }
+  // 'auto' mode: sesteki başlangıç zamanı veya şu anki zaman
+  if (globalVoiceStartTime) return globalVoiceStartTime;
+  return Date.now();
+}
+
+function applyRpcToClient(data) {
+  if (!data || data.status !== 'connected' || !data.client || !data.client.user) return;
+  try {
+    // Eğer global RPC kapalıysa VEYA bu hesaba özel RPC kapatılmışsa aktiviteyi kaldır
+    if (!customRPC.enabled || data.rpcEnabled === false) {
+      data.client.user.setActivity(null);
+      return;
+    }
+
+    const rpc = new RichPresence(data.client)
+      .setName(customRPC.name || 'Dragon.')
+      .setType(customRPC.type || 'PLAYING')
+      .setApplicationId(RPC_APP_ID);
+
+    const detailsText = customRPC.details !== undefined && customRPC.details !== null ? customRPC.details : '7/24 Online.';
+    const stateText = customRPC.state !== undefined && customRPC.state !== null ? customRPC.state : 'Burası Şimdilik Sessiz.';
+
+    if (detailsText) rpc.setDetails(detailsText);
+    if (stateText) rpc.setState(stateText);
+
+    // Resim önceliği: Eğer kullanıcı Discord CDN / mp: formatında bir URL verdiyse onu, yoksa çözümlenen Dragon CDN logosunu kullan
+    let imgToSet = null;
+    if (customRPC.largeImage && (customRPC.largeImage.includes('discordapp.com') || customRPC.largeImage.includes('discordapp.net') || customRPC.largeImage.startsWith('mp:'))) {
+      imgToSet = customRPC.largeImage;
+    } else {
+      imgToSet = cachedDragonLogoCdnUrl;
+    }
+
+    if (imgToSet) {
+      try {
+        rpc.setAssetsLargeImage(imgToSet);
+      } catch(e) {
+        console.warn('[RPC] setAssetsLargeImage failed for img:', imgToSet, e.message);
+      }
+    }
+
+    try {
+      rpc.setAssetsLargeText(customRPC.name || 'Dragon.');
+    } catch(e) {}
+
+    const startTimestamp = getRpcTimestamp();
+    if (startTimestamp) rpc.setStartTimestamp(startTimestamp);
+
+    // Ses bağlantısını ASLA etkilemeden sadece Gateway presence güncellemesi gönder
+    data.client.user.setActivity(rpc);
+  } catch(e) {
+    console.error(`[RPC ${data.token?.slice(0, 8)}] Error setting activity:`, e.message);
+  }
 }
 
 async function updateAllRPC() {
@@ -1089,46 +1242,7 @@ async function updateAllRPC() {
   }
 
   clients.forEach((c) => {
-    if (c.status === 'connected' && c.client && c.client.user) {
-      try {
-        if (!customRPC.enabled) {
-          c.client.user.setActivity(null);
-          return;
-        }
-
-        const rpc = new RichPresence(c.client)
-          .setName(customRPC.name || 'Dragon')
-          .setType(customRPC.type || 'PLAYING')
-          .setApplicationId(RPC_APP_ID);
-
-        const detailsText = customRPC.details !== undefined && customRPC.details !== ''
-          ? customRPC.details
-          : `Using ${clients.size} Account(s)`;
-
-        const stateText = customRPC.state !== undefined && customRPC.state !== ''
-          ? customRPC.state
-          : (targetUserId ? `Tracking: ${targetUserId.slice(0,6)}...` : (c.connection ? 'In Voice Channel' : 'Idle'));
-
-        if (detailsText) rpc.setDetails(detailsText);
-        if (stateText) rpc.setState(stateText);
-
-        const imgToSet = cachedDragonLogoCdnUrl || customRPC.largeImage;
-        if (imgToSet) {
-          try {
-            rpc.setAssetsLargeImage(imgToSet);
-          } catch(e) {}
-        }
-
-        try {
-          rpc.setAssetsLargeText(customRPC.name || 'Dragon');
-        } catch(e) {}
-
-        if (globalVoiceStartTime) rpc.setStartTimestamp(globalVoiceStartTime);
-        c.client.user.setActivity(rpc);
-      } catch(e) {
-        console.error('[RPC] Error setting activity:', e.message);
-      }
-    }
+    applyRpcToClient(c);
   });
 }
 
@@ -1250,6 +1364,16 @@ function setupSocket(io) {
       if (rpcData && typeof rpcData === 'object') {
         customRPC = { ...customRPC, ...rpcData };
         updateAllRPC();
+        broadcastState();
+      }
+    });
+
+    socket.on('toggle_account_rpc', ({ token, enabled }) => {
+      const cleanToken = token ? token.replace(/^["']|["']$/g, '').trim() : '';
+      const data = clients.get(cleanToken) || clients.get(token);
+      if (data) {
+        data.rpcEnabled = !!enabled;
+        applyRpcToClient(data);
         broadcastState();
       }
     });
@@ -1395,6 +1519,36 @@ function setupSocket(io) {
         message: 'Tüm hesaplar ve tokenlar başarıyla temizlendi!'
       });
       console.log('[Token] All accounts and tokens cleared.');
+    });
+
+    socket.on('upload_global_media', ({ name, buffer }, callback) => {
+      try {
+        const ext = path.extname(name || 'media.mp3') || '.mp3';
+        const tempDir = path.join(os.tmpdir(), 'dragon_service_media');
+        if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+        const tempFilePath = path.join(tempDir, `global_media_${Date.now()}${ext}`);
+        fs.writeFileSync(tempFilePath, Buffer.from(buffer));
+        console.log('[Media] Saved uploaded global media to:', tempFilePath);
+        if (typeof callback === 'function') callback({ success: true, filePath: tempFilePath, fileName: name });
+      } catch (err) {
+        console.error('[Media] Upload global media error:', err);
+        if (typeof callback === 'function') callback({ success: false, error: err.message });
+      }
+    });
+
+    socket.on('upload_account_media', ({ token, name, buffer }, callback) => {
+      try {
+        const ext = path.extname(name || 'media.mp3') || '.mp3';
+        const tempDir = path.join(os.tmpdir(), 'dragon_service_media');
+        if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+        const tempFilePath = path.join(tempDir, `account_media_${Date.now()}_${token ? token.slice(0,6) : 'acc'}${ext}`);
+        fs.writeFileSync(tempFilePath, Buffer.from(buffer));
+        console.log('[Media] Saved uploaded account media to:', tempFilePath);
+        if (typeof callback === 'function') callback({ success: true, filePath: tempFilePath, fileName: name });
+      } catch (err) {
+        console.error('[Media] Upload account media error:', err);
+        if (typeof callback === 'function') callback({ success: false, error: err.message });
+      }
     });
 
     socket.on('play_global_file', ({ filePath, volumeDb, loop, seekSeconds, pitch, reverb, bass, hz, dominance, clarity, normalVolume, is8D, speed8D, eq }) => {
@@ -1602,12 +1756,18 @@ function setupSocket(io) {
         const data = clients.get(token);
         data.softMute = !!state;
         if (state) {
-          data._stopping = true;
+          // Mute: unsubscribe this account from masterAudioPlayer → complete silence
+          if (data.subscription) {
+            try { data.subscription.unsubscribe(); } catch(e) {}
+            data.subscription = null;
+          }
           if (data.player) { try { data.player.stop(true); } catch(e){} }
           if (data.pcmStream) { try { data.pcmStream.end(); } catch(e){} data.pcmStream = null; }
-          setTimeout(() => { data._stopping = false; }, 200);
         } else {
-          if (data.connection && data.status === 'connected') setupAudioForClient(data);
+          // Unmute: resubscribe to masterAudioPlayer
+          if (data.connection && data.status === 'connected') {
+            setupAudioForClient(data);
+          }
         }
         broadcastState();
       }
@@ -1766,7 +1926,7 @@ async function connectClient(token) {
     }
   });
 
-  const data = { client, token: cleanToken, status: 'connecting', user: null, connection: null, error: null, platform: globalPlatform };
+  const data = { client, token: cleanToken, status: 'connecting', user: null, connection: null, error: null, platform: globalPlatform, rpcEnabled: true };
   clients.set(cleanToken, data);
   broadcastState();
 
@@ -2415,6 +2575,7 @@ function broadcastState() {
   const state = Array.from(clients.values()).map(c => ({
     token: c.token, status: c.status, user: c.user,
     error: c.error, inVoice: !!c.connection, softMute: !!c.softMute,
+    rpcEnabled: c.rpcEnabled !== false,
     mediaStatus: c.mediaStatus || 'stopped',
     mediaFilePath: c.mediaFilePath || null,
     cameraActive: !!c.cameraActive,

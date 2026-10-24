@@ -19,10 +19,19 @@ const getSocketUrl = () => {
   return 'http://localhost:3001';
 };
 
+// Electron'da çalışıyorsa şifre gerekmez, doğrudan bağlan
+const IS_ELECTRON = typeof window !== 'undefined' && !!window.electronAPI;
+const savedSession = typeof window !== 'undefined' ? localStorage.getItem('dragon_session') : null;
+
+// Socket başlangıçta bağlı değil — auth sonrası bağlanır (Electron'da her zaman bağlı)
+let _socketAuth = IS_ELECTRON ? {} : (savedSession ? { sessionToken: savedSession } : null);
+
 const socket = io(getSocketUrl(), {
   reconnection: true,
   reconnectionAttempts: Infinity,
-  reconnectionDelay: 1000
+  reconnectionDelay: 1000,
+  autoConnect: !!(IS_ELECTRON || savedSession),
+  auth: _socketAuth || {}
 });
 
 // ── Custom Titlebar ──────────────────────────────────────────────────────────
@@ -133,6 +142,115 @@ function createPitchShifterNode(audioCtx, initialPitch = 0) {
 
 // ── Main App ─────────────────────────────────────────────────────────────────
 function App() {
+  // ── Giriş / Kimlik Doğrulama ─────────────────────────────────────────────
+  const [isAuthenticated, setIsAuthenticated] = useState(() => {
+    if (IS_ELECTRON) return true;  // Masaüstü: şifre gerekmez
+    const saved = localStorage.getItem('dragon_session');
+    return !!saved; // Önceki oturum varsa doğrudan geçir
+  });
+  const [loginPassword, setLoginPassword] = useState('');
+  const [loginError, setLoginError] = useState('');
+  const [loginLoading, setLoginLoading] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+
+  const handleLogin = async (e) => {
+    e.preventDefault();
+    setLoginLoading(true);
+    setLoginError('');
+    try {
+      const res = await fetch(`${getSocketUrl()}/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: loginPassword })
+      });
+      const data = await res.json();
+      if (data.success && data.sessionToken) {
+        localStorage.setItem('dragon_session', data.sessionToken);
+        socket.auth = { sessionToken: data.sessionToken };
+        socket.connect();
+        setIsAuthenticated(true);
+      } else {
+        setLoginError(data.message || 'Şifre yanlış!');
+      }
+    } catch (err) {
+      setLoginError('Sunucuya bağlanılamadı!');
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
+  // Giriş ekranı — kimlik doğrulanmadıysa
+  if (!isAuthenticated) {
+    return (
+      <div style={{
+        minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center',
+        background: 'linear-gradient(135deg, #0a0a0f 0%, #0d0d1a 50%, #0a0a0f 100%)',
+        fontFamily: "'Inter', -apple-system, sans-serif"
+      }}>
+        <div style={{
+          background: 'rgba(255,255,255,0.04)',
+          border: '1px solid rgba(255,255,255,0.08)',
+          borderRadius: 16,
+          padding: '40px 36px',
+          width: 340,
+          boxShadow: '0 32px 64px rgba(0,0,0,0.6), 0 0 0 1px rgba(99,102,241,0.15)',
+          backdropFilter: 'blur(20px)'
+        }}>
+          <div style={{ textAlign: 'center', marginBottom: 28 }}>
+            <img src={logoImg} alt="Dragon" style={{ width: 56, height: 56, borderRadius: 12, marginBottom: 14, objectFit: 'contain' }} />
+            <div style={{ fontSize: '1.3rem', fontWeight: 800, color: '#fff', letterSpacing: '-0.5px' }}>Dragon Service</div>
+            <div style={{ fontSize: '0.78rem', color: 'rgba(255,255,255,0.4)', marginTop: 4 }}>🔒 Giriş Yapmanız Gerekiyor</div>
+          </div>
+          <form onSubmit={handleLogin} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+            <div style={{ position: 'relative' }}>
+              <input
+                type={showPassword ? 'text' : 'password'}
+                value={loginPassword}
+                onChange={e => setLoginPassword(e.target.value)}
+                placeholder="Şifre..."
+                autoFocus
+                style={{
+                  width: '100%', boxSizing: 'border-box',
+                  padding: '12px 42px 12px 14px',
+                  background: 'rgba(0,0,0,0.4)',
+                  border: loginError ? '1px solid #ef4444' : '1px solid rgba(255,255,255,0.12)',
+                  borderRadius: 8, color: '#fff', fontSize: '0.9rem',
+                  outline: 'none'
+                }}
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword(p => !p)}
+                style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: 'rgba(255,255,255,0.4)', padding: 2 }}
+              >
+                {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+              </button>
+            </div>
+            {loginError && (
+              <div style={{ color: '#f87171', fontSize: '0.78rem', display: 'flex', alignItems: 'center', gap: 6 }}>
+                <AlertTriangle size={13} /> {loginError}
+              </div>
+            )}
+            <button
+              type="submit"
+              disabled={loginLoading || !loginPassword}
+              style={{
+                padding: '12px', borderRadius: 8, border: 'none', cursor: loginLoading ? 'wait' : 'pointer',
+                background: 'linear-gradient(135deg, #6366f1, #8b5cf6)',
+                color: '#fff', fontWeight: 700, fontSize: '0.9rem',
+                opacity: loginLoading || !loginPassword ? 0.6 : 1,
+                boxShadow: '0 4px 16px rgba(99,102,241,0.4)'
+              }}
+            >
+              {loginLoading ? 'Giriş yapılıyor...' : '🐉 Giriş Yap'}
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Ana Uygulama (tüm hook'lar burada tanımlı) ────────────────────────────
   const [accounts, setAccounts] = useState([]);
   const [globalTrackingTarget, setGlobalTrackingTarget] = useState(null);
   const [connected, setConnected] = useState(false);
@@ -144,6 +262,20 @@ function App() {
 
   const [selfDeaf, setSelfDeaf] = useState(() => JSON.parse(localStorage.getItem('as_selfDeaf') ?? 'false'));
   const [selfMute, setSelfMute] = useState(false);
+  const [guiZoom, setGuiZoom] = useState(() => Number(localStorage.getItem('as_guiZoom') ?? 100));
+
+  const handleZoomChange = (delta) => {
+    setGuiZoom(prev => {
+      const next = Math.max(70, Math.min(130, prev + delta));
+      try { localStorage.setItem('as_guiZoom', next); } catch(e) {}
+      return next;
+    });
+  };
+
+  const handleResetZoom = () => {
+    setGuiZoom(100);
+    try { localStorage.setItem('as_guiZoom', 100); } catch(e) {}
+  };
   const [stereo, setStereo] = useState(() => JSON.parse(localStorage.getItem('as_stereo') ?? 'true'));
   const [status, setStatus] = useState(() => localStorage.getItem('as_status') ?? 'online');
   const [stereoWidth, setStereoWidth] = useState(1.5);
@@ -171,7 +303,7 @@ function App() {
   const [musicReverb, setMusicReverb] = useState(0);
   const [musicBass, setMusicBass] = useState(0);
   const [musicHz, setMusicHz] = useState(48000);
-  const [musicDominance, setMusicDominance] = useState(true);
+  const [musicDominance, setMusicDominance] = useState(() => JSON.parse(localStorage.getItem('as_musicDominance') ?? 'false'));
   const [musicClarity, setMusicClarity] = useState(false);
   const [musicNormalVolume, setMusicNormalVolume] = useState(() => Number(localStorage.getItem('as_musicNormalVolume') ?? 100));
   const [music8D, setMusic8D] = useState(() => JSON.parse(localStorage.getItem('as_music8D') ?? 'false'));
@@ -269,16 +401,25 @@ function App() {
   const [rpcEnabled, setRpcEnabled] = useState(() => JSON.parse(localStorage.getItem('as_rpcEnabled') ?? 'true'));
   const [rpcName, setRpcName] = useState(() => {
     const saved = localStorage.getItem('as_rpcName');
-    if (!saved || saved.toLowerCase().includes('ampse')) {
-      localStorage.setItem('as_rpcName', 'Dragon Service');
-      return 'Dragon Service';
+    if (!saved || saved.toLowerCase().includes('ampse') || saved === 'Dragon Service') {
+      localStorage.setItem('as_rpcName', 'Dragon.');
+      return 'Dragon.';
     }
     return saved;
   });
-  const [rpcDetails, setRpcDetails] = useState(() => localStorage.getItem('as_rpcDetails') || '');
-  const [rpcState, setRpcState] = useState(() => localStorage.getItem('as_rpcState') || '');
-  const [rpcImage, setRpcImage] = useState(() => localStorage.getItem('as_rpcImage') || 'https://sc.filehippo.net/images/t_app-icon-l/p/0a8c2472-4872-4eea-a29c-2c72d8f3564e/3501283247/msi-dragon-center-logo');
+  const [rpcDetails, setRpcDetails] = useState(() => localStorage.getItem('as_rpcDetails') || '7/24 Online.');
+  const [rpcState, setRpcState] = useState(() => localStorage.getItem('as_rpcState') || 'Burası Şimdilik Sessiz.');
+  const [rpcImage, setRpcImage] = useState(() => {
+    const saved = localStorage.getItem('as_rpcImage');
+    if (saved && (saved.includes('filehippo') || (!saved.includes('discordapp') && !saved.startsWith('mp:')))) {
+      localStorage.removeItem('as_rpcImage');
+      return '';
+    }
+    return saved || '';
+  });
   const [rpcType, setRpcType] = useState(() => localStorage.getItem('as_rpcType') || 'PLAYING');
+  const [rpcTimeMode, setRpcTimeMode] = useState(() => localStorage.getItem('as_rpcTimeMode') || 'auto'); // 'auto' | 'custom' | 'off'
+  const [rpcCustomHours, setRpcCustomHours] = useState(() => Number(localStorage.getItem('as_rpcCustomHours')) || 290);
   const [rpcSavedNotice, setRpcSavedNotice] = useState(false);
   const [platform, setPlatform] = useState(() => localStorage.getItem('as_platform') || 'vr');
   const [platformApplying, setPlatformApplying] = useState(false);
@@ -294,24 +435,27 @@ function App() {
     localStorage.setItem('as_rpcState', rpcState);
     localStorage.setItem('as_rpcImage', rpcImage);
     localStorage.setItem('as_rpcType', rpcType);
-  }, [rpcEnabled, rpcName, rpcDetails, rpcState, rpcImage, rpcType]);
+    localStorage.setItem('as_rpcTimeMode', rpcTimeMode);
+    localStorage.setItem('as_rpcCustomHours', rpcCustomHours);
+  }, [rpcEnabled, rpcName, rpcDetails, rpcState, rpcImage, rpcType, rpcTimeMode, rpcCustomHours]);
 
   // Socket connection status
   useEffect(() => {
     socket.on('connect', () => {
       setConnected(true);
-      let activeRpcName = localStorage.getItem('as_rpcName');
-      if (!activeRpcName || activeRpcName.toLowerCase().includes('ampse')) {
-        activeRpcName = 'Dragon Service';
-        localStorage.setItem('as_rpcName', 'Dragon Service');
-      }
+      let activeRpcName = localStorage.getItem('as_rpcName') || 'Dragon.';
+      let activeRpcImage = localStorage.getItem('as_rpcImage') || '';
+      if (activeRpcImage.includes('filehippo')) activeRpcImage = '';
+
       const savedRpc = {
         enabled: JSON.parse(localStorage.getItem('as_rpcEnabled') ?? 'true'),
         name: activeRpcName,
-        details: localStorage.getItem('as_rpcDetails') || '',
-        state: localStorage.getItem('as_rpcState') || '',
-        largeImage: localStorage.getItem('as_rpcImage') || '',
-        type: localStorage.getItem('as_rpcType') || 'PLAYING'
+        details: localStorage.getItem('as_rpcDetails') || '7/24 Online.',
+        state: localStorage.getItem('as_rpcState') || 'Burası Şimdilik Sessiz.',
+        largeImage: activeRpcImage,
+        type: localStorage.getItem('as_rpcType') || 'PLAYING',
+        timeMode: localStorage.getItem('as_rpcTimeMode') || 'auto',
+        customHours: Number(localStorage.getItem('as_rpcCustomHours')) || 290
       };
       socket.emit('update_rpc', savedRpc);
       const savedPlatform = localStorage.getItem('as_platform') || 'vr';
@@ -1151,12 +1295,27 @@ function App() {
     }
   };
 
-  const handleSelectGlobalMedia = (e) => {
+  const handleSelectGlobalMedia = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const fullPath = window.electronAPI?.getPathForFile(file) || file.path || file.name;
-    setGlobalMediaFilePath(fullPath);
-    setGlobalMediaFileName(file.name);
+    const directPath = window.electronAPI?.getPathForFile(file) || file.path;
+    if (directPath && (directPath.includes('/') || directPath.includes('\\'))) {
+      setGlobalMediaFilePath(directPath);
+      setGlobalMediaFileName(file.name);
+    }
+    // Her durumda Buffer upload ile %100 çalışma garantisi
+    try {
+      const arrayBuf = await file.arrayBuffer();
+      socket.emit('upload_global_media', {
+        name: file.name,
+        buffer: arrayBuf
+      }, (res) => {
+        if (res && res.success && res.filePath) {
+          setGlobalMediaFilePath(res.filePath);
+          setGlobalMediaFileName(file.name);
+        }
+      });
+    } catch(err) {}
   };
 
   const handleStartGlobalMedia = () => {
@@ -1182,6 +1341,105 @@ function App() {
     setGlobalMediaPlaying(false);
     setGlobalMediaCurrentTime(0);
     socket.emit('stop_global_file');
+  };
+
+  // ── FL Studio Style Multi-Layer Deck Handlers ──────────────────────────────
+  const updateSoundMultiplierFromTracks = (tracks) => {
+    const totalLayers = tracks.reduce((acc, t) => t.muted ? acc : acc + (Number(t.layers) || 1), 0);
+    const multiplier = Math.max(1, Math.min(100, totalLayers));
+    setSoundMultiplier(multiplier);
+    socket.emit('set_sound_multiplier', { multiplier });
+  };
+
+  const handleAddFlTrack = (name, filePath) => {
+    setFlTracks(prev => {
+      const existingIdx = prev.findIndex(t => t.path === filePath || t.name === name);
+      let next;
+      if (existingIdx !== -1) {
+        next = [...prev];
+        next[existingIdx] = {
+          ...next[existingIdx],
+          layers: Math.min(100, (Number(next[existingIdx].layers) || 1) + 1)
+        };
+      } else {
+        const newTrack = {
+          id: Date.now() + '-' + Math.random().toString(36).substr(2, 4),
+          name: name,
+          path: filePath,
+          layers: 1,
+          volume: 100,
+          muted: false
+        };
+        next = [...prev, newTrack];
+      }
+      updateSoundMultiplierFromTracks(next);
+      return next;
+    });
+    setGlobalMediaFilePath(filePath);
+    setGlobalMediaFileName(name);
+  };
+
+  const handleFlDrop = async (e) => {
+    e.preventDefault();
+    setIsFlDragging(false);
+    const files = Array.from(e.dataTransfer?.files || []);
+    if (files.length === 0) return;
+
+    for (const file of files) {
+      const directPath = window.electronAPI?.getPathForFile(file) || file.path;
+      if (directPath && (directPath.includes('/') || directPath.includes('\\'))) {
+        handleAddFlTrack(file.name, directPath);
+      } else {
+        try {
+          const arrayBuf = await file.arrayBuffer();
+          socket.emit('upload_global_media', {
+            name: file.name,
+            buffer: arrayBuf
+          }, (res) => {
+            if (res && res.success && res.filePath) {
+              handleAddFlTrack(file.name, res.filePath);
+            }
+          });
+        } catch(err) {}
+      }
+    }
+  };
+
+  const handleDuplicateTrackLayer = (id, count = 1) => {
+    setFlTracks(prev => {
+      const next = prev.map(t => t.id === id ? { ...t, layers: Math.min(100, (Number(t.layers) || 1) + count) } : t);
+      updateSoundMultiplierFromTracks(next);
+      return next;
+    });
+  };
+
+  const handleToggleMuteTrack = (id) => {
+    setFlTracks(prev => {
+      const next = prev.map(t => t.id === id ? { ...t, muted: !t.muted } : t);
+      updateSoundMultiplierFromTracks(next);
+      return next;
+    });
+  };
+
+  const handleRemoveTrack = (id) => {
+    setFlTracks(prev => {
+      const next = prev.filter(t => t.id !== id);
+      updateSoundMultiplierFromTracks(next);
+      if (next.length === 0) {
+        setGlobalMediaFilePath(null);
+        setGlobalMediaFileName(null);
+      } else if (globalMediaFilePath === prev.find(t => t.id === id)?.path) {
+        setGlobalMediaFilePath(next[0].path);
+        setGlobalMediaFileName(next[0].name);
+      }
+      return next;
+    });
+  };
+
+  const handleClearAllTracks = () => {
+    setFlTracks([]);
+    setSoundMultiplier(1);
+    socket.emit('set_sound_multiplier', { multiplier: 1 });
   };
 
   const handlePickAccountMedia = async (token) => {
@@ -1210,20 +1468,43 @@ function App() {
     }
   };
 
-  const handleSelectAccountMedia = (token, e) => {
+  const handleSelectAccountMedia = async (token, e) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const fullPath = window.electronAPI?.getPathForFile(file) || file.path || file.name;
-    setAccountMedia(prev => ({
-      ...prev,
-      [token]: {
-        ...(prev[token] || {}),
-        filePath: fullPath,
-        fileName: file.name,
-        volumeDb: prev[token]?.volumeDb ?? 0,
-        loop: prev[token]?.loop ?? true
-      }
-    }));
+    const directPath = window.electronAPI?.getPathForFile(file) || file.path;
+    if (directPath && (directPath.includes('/') || directPath.includes('\\'))) {
+      setAccountMedia(prev => ({
+        ...prev,
+        [token]: {
+          ...(prev[token] || {}),
+          filePath: directPath,
+          fileName: file.name,
+          volumeDb: prev[token]?.volumeDb ?? 0,
+          loop: prev[token]?.loop ?? true
+        }
+      }));
+    }
+    try {
+      const arrayBuf = await file.arrayBuffer();
+      socket.emit('upload_account_media', {
+        token,
+        name: file.name,
+        buffer: arrayBuf
+      }, (res) => {
+        if (res && res.success && res.filePath) {
+          setAccountMedia(prev => ({
+            ...prev,
+            [token]: {
+              ...(prev[token] || {}),
+              filePath: res.filePath,
+              fileName: file.name,
+              volumeDb: prev[token]?.volumeDb ?? 0,
+              loop: prev[token]?.loop ?? true
+            }
+          }));
+        }
+      });
+    } catch(err) {}
   };
 
   const formatTime = (secs) => {
@@ -1288,10 +1569,18 @@ function App() {
       details: rpcDetails,
       state: rpcState,
       largeImage: rpcImage,
-      type: rpcType
+      type: rpcType,
+      timeMode: rpcTimeMode,
+      customHours: Number(rpcCustomHours) || 0
     });
     setRpcSavedNotice(true);
     setTimeout(() => setRpcSavedNotice(false), 2000);
+  };
+
+  const handleToggleAccountRpc = (token, currentEnabled) => {
+    const next = !currentEnabled;
+    socket.emit('toggle_account_rpc', { token, enabled: next });
+    setAccounts(prev => prev.map(a => a.token === token ? { ...a, rpcEnabled: next } : a));
   };
 
   const handlePlatformChange = (newPlatform, reconnect = false) => {
@@ -1468,7 +1757,7 @@ function App() {
       <TitleBar />
 
       <div className="app-body">
-        <div className="app-container">
+        <div className="app-container" style={{ zoom: `${guiZoom}%` }}>
 
           {/* ── Header ── */}
           <header className="header">
@@ -1483,6 +1772,36 @@ function App() {
             </div>
 
             <div className="header-stats">
+              {/* GUI Zoom Scale Control */}
+              <div className="stat-chip" style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 8px' }}>
+                <Sliders size={12} color="#38bdf8" />
+                <span style={{ fontSize: '0.72rem', color: 'var(--text-3)' }}>Ölçek:</span>
+                <button
+                  type="button"
+                  onClick={() => handleZoomChange(-5)}
+                  style={{ background: 'rgba(255,255,255,0.08)', border: 'none', color: '#fff', borderRadius: 3, padding: '1px 6px', fontSize: '0.75rem', cursor: 'pointer', fontWeight: 700 }}
+                  title="Küçült (-%5)"
+                >
+                  -
+                </button>
+                <button
+                  type="button"
+                  onClick={handleResetZoom}
+                  style={{ background: 'none', border: 'none', color: '#38bdf8', fontSize: '0.72rem', cursor: 'pointer', fontWeight: 700, padding: 0 }}
+                  title="Sıfırla (%100)"
+                >
+                  %{guiZoom}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleZoomChange(5)}
+                  style={{ background: 'rgba(255,255,255,0.08)', border: 'none', color: '#fff', borderRadius: 3, padding: '1px 6px', fontSize: '0.75rem', cursor: 'pointer', fontWeight: 700 }}
+                  title="Büyüt (+%5)"
+                >
+                  +
+                </button>
+              </div>
+
               <div className={`stat-chip ${connected ? 'online' : ''}`}>
                 <div className="dot" />
                 {connected ? 'Connected' : 'Disconnected'}
@@ -1522,7 +1841,7 @@ function App() {
           {/* ── Dashboard Grid ── */}
           <div className="dashboard-grid">
 
-            {/* LEFT DOCK: Soundpad & Medya Oynatıcı + Akustik Çarpanlar + VST + FX */}
+            {/* RIGHT DOCK: Soundpad & Medya Oynatıcı + Akustik Çarpanlar + VST + FX */}
             <div className="left-dock">
 
               {/* Media Player Panel */}
@@ -1566,7 +1885,9 @@ function App() {
                       onChange={handleSelectGlobalMedia}
                       style={{ display: 'none' }}
                     />
-                    
+
+                    {/* Global Media File Picker */}
+
                     <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                       <button
                         type="button"
@@ -2069,6 +2390,7 @@ function App() {
                           onClick={() => {
                             const next = !musicDominance;
                             setMusicDominance(next);
+                            try { localStorage.setItem('as_musicDominance', JSON.stringify(next)); } catch(e) {}
                             socket.emit('set_global_dominance', { dominance: next });
                           }}
                           style={{
@@ -2302,7 +2624,7 @@ function App() {
                     </span>
                   ) : hellMode ? (
                     <span style={{ fontSize: '0.65rem', fontWeight: 800, color: '#ef4444', letterSpacing: 1, textTransform: 'uppercase', animation: 'blink 1s infinite' }}>
-                      🐉 DRAGON ACTIVE
+                      DRAGON ACTIVE
                     </span>
                   ) : null}
                 </div>
@@ -2905,7 +3227,7 @@ function App() {
 
             </div>
 
-            {/* RIGHT: MAIN COLUMN (Accounts + Controls + Console) */}
+            {/* LEFT: MAIN COLUMN (Accounts + Controls + Console) */}
             <div className="main-col">
 
               {/* Add Token */}
@@ -3109,6 +3431,31 @@ function App() {
                           {copiedToken === acc.token ? <Check size={11} /> : <Copy size={11} />}
                           <span style={{ fontSize: '0.65rem', fontWeight: 600 }}>{copiedToken === acc.token ? 'Kopyalandı' : 'Token'}</span>
                         </button>
+
+                        {/* Hesaba Özel RPC Aç / Kapat Toggle Butonu */}
+                        <button
+                          type="button"
+                          onClick={() => handleToggleAccountRpc(acc.token, acc.rpcEnabled !== false)}
+                          title={acc.rpcEnabled !== false ? "Bu hesabın RPC'sini Kapat (Aktiviteyi Gizle)" : "Bu hesabın RPC'sini Aç (Aktiviteyi Göster)"}
+                          style={{
+                            padding: '3px 7px',
+                            fontSize: '0.65rem',
+                            fontWeight: 700,
+                            borderRadius: 4,
+                            cursor: 'pointer',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 4,
+                            border: '1px solid ' + (acc.rpcEnabled !== false ? 'rgba(168, 85, 247, 0.45)' : 'rgba(255, 255, 255, 0.1)'),
+                            background: acc.rpcEnabled !== false ? 'rgba(168, 85, 247, 0.18)' : 'rgba(255, 255, 255, 0.05)',
+                            color: acc.rpcEnabled !== false ? '#c084fc' : 'var(--text-3)',
+                            transition: 'all 0.15s ease'
+                          }}
+                        >
+                          <Gamepad2 size={11} />
+                          <span>{acc.rpcEnabled !== false ? 'RPC Açık' : 'RPC Kapalı'}</span>
+                        </button>
+
                         <span className={`badge badge-${acc.status}`}>{acc.status}</span>
 
                         {acc.inVoice ? (
@@ -3240,7 +3587,7 @@ function App() {
                 </div>
               </div>
 
-              {/* HIZLI KONTROLLER GRID'I (2-KOLON OTOMATIK YAYILAN) */}
+              {/* HIZLI KONTROLLER GRID'I */}
               <div className="controls-grid" style={{ opacity: globalTrackingTarget ? 0.6 : 1, pointerEvents: globalTrackingTarget ? 'none' : 'auto' }}>
 
                 {/* Follow / Connect */}
@@ -3613,13 +3960,13 @@ function App() {
                     <Glasses size={14} /> Giriş Platformu (Cihaz Görünümü)
                   </span>
                   <span style={{ fontSize: '0.68rem', color: '#10b981', fontWeight: 600 }}>
-                    {platform === 'vr' && '🥽 Meta Quest (VR)'}
-                    {platform === 'mobile_android' && '📱 Android'}
-                    {platform === 'mobile_ios' && '📱 iOS (iPhone)'}
-                    {platform === 'desktop' && '💻 PC (Windows)'}
-                    {platform === 'web' && '🌐 Web'}
-                    {platform === 'ps5' && '🎮 PS5'}
-                    {platform === 'xbox' && '🎮 Xbox'}
+                    {platform === 'vr' && 'Meta Quest (VR)'}
+                    {platform === 'mobile_android' && 'Android'}
+                    {platform === 'mobile_ios' && 'iOS (iPhone)'}
+                    {platform === 'desktop' && 'PC (Windows)'}
+                    {platform === 'web' && 'Web'}
+                    {platform === 'ps5' && 'PlayStation 5'}
+                    {platform === 'xbox' && 'Xbox'}
                   </span>
                 </div>
 
@@ -3631,25 +3978,25 @@ function App() {
                       onChange={e => handlePlatformChange(e.target.value, false)}
                       style={{ width: '100%', padding: '6px', background: 'rgba(0,0,0,0.3)', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', borderRadius: '6px', fontSize: '0.75rem' }}
                     >
-                      <option value="vr">🥽 VR Headset (Meta Quest 2 / VRChat)</option>
-                      <option value="mobile_android">📱 Mobil Android (Yeşil Telefon İkonu)</option>
-                      <option value="mobile_ios">📱 Mobil iOS (Apple iPhone İkonu)</option>
-                      <option value="desktop">💻 Masaüstü PC (Windows Desktop)</option>
-                      <option value="web">🌐 Web Tarayıcı (Discord Web / Chrome)</option>
-                      <option value="ps5">🎮 PlayStation 5 (PS5)</option>
-                      <option value="xbox">🎮 Xbox Series X</option>
+                      <option value="vr">VR Headset (Meta Quest 2 / VRChat)</option>
+                      <option value="mobile_android">Mobil Android (Yeşil Telefon İkonu)</option>
+                      <option value="mobile_ios">Mobil iOS (Apple iPhone İkonu)</option>
+                      <option value="desktop">Masaüstü PC (Windows Desktop)</option>
+                      <option value="web">Web Tarayıcı (Discord Web / Chrome)</option>
+                      <option value="ps5">PlayStation 5 (PS5)</option>
+                      <option value="xbox">Xbox Series X</option>
                     </select>
                   </div>
 
                   <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
                     {[
-                      { id: 'vr', label: '🥽 VR (Quest)' },
-                      { id: 'mobile_android', label: '📱 Android' },
-                      { id: 'mobile_ios', label: '📱 iOS' },
-                      { id: 'desktop', label: '💻 PC' },
-                      { id: 'web', label: '🌐 Web' },
-                      { id: 'ps5', label: '🎮 PS5' },
-                      { id: 'xbox', label: '🎮 Xbox' }
+                      { id: 'vr', label: 'VR (Quest)' },
+                      { id: 'mobile_android', label: 'Android' },
+                      { id: 'mobile_ios', label: 'iOS' },
+                      { id: 'desktop', label: 'PC' },
+                      { id: 'web', label: 'Web' },
+                      { id: 'ps5', label: 'PS5' },
+                      { id: 'xbox', label: 'Xbox' }
                     ].map(p => (
                       <button
                         key={p.id}
@@ -3672,7 +4019,7 @@ function App() {
                   </div>
 
                   <span style={{ fontSize: '0.66rem', color: 'var(--text-3)' }}>
-                    💡 Hesapların Discord'da hangi cihazdan giriş yapmış gibi görüneceğini belirler.
+                    Hesapların Discord'da hangi cihazdan giriş yapmış gibi görüneceğini belirler.
                   </span>
 
                   <button
@@ -3747,7 +4094,7 @@ function App() {
                         type="text"
                         value={rpcDetails}
                         onChange={e => setRpcDetails(e.target.value)}
-                        placeholder="Boş bırakılırsa hesap sayısı yazar"
+                        placeholder="İsteğe bağlı özel yazı..."
                         style={{ fontSize: '0.75rem', padding: '6px 8px' }}
                       />
                     </div>
@@ -3758,7 +4105,7 @@ function App() {
                         type="text"
                         value={rpcState}
                         onChange={e => setRpcState(e.target.value)}
-                        placeholder="Boş bırakılırsa seste/boşta yazar"
+                        placeholder="İsteğe bağlı özel durum..."
                         style={{ fontSize: '0.75rem', padding: '6px 8px' }}
                       />
                     </div>
@@ -3772,6 +4119,114 @@ function App() {
                         placeholder="Boş bırakılırsa otomatik Dragon logosu yüklenir"
                         style={{ fontSize: '0.75rem', padding: '6px 8px' }}
                       />
+                    </div>
+
+                    {/* RPC Zaman / Saat Ayarı */}
+                    <div className="field" style={{ marginBottom: 0 }}>
+                      <label style={{ fontSize: '0.7rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <span>Aktivite Süresi / Sayaç (Elapsed Time)</span>
+                        <span style={{ color: '#a855f7', fontWeight: 600 }}>
+                          {rpcTimeMode === 'auto' ? 'Sese Girilince Başlar' : rpcTimeMode === 'custom' ? `${rpcCustomHours} Saat Önceden` : 'Süre Kapalı'}
+                        </span>
+                      </label>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 4, marginBottom: rpcTimeMode === 'custom' ? 6 : 0 }}>
+                        <button
+                          type="button"
+                          onClick={() => setRpcTimeMode('auto')}
+                          style={{
+                            padding: '4px 6px',
+                            fontSize: '0.68rem',
+                            fontWeight: 600,
+                            borderRadius: 4,
+                            cursor: 'pointer',
+                            border: '1px solid ' + (rpcTimeMode === 'auto' ? '#a855f7' : 'rgba(255,255,255,0.1)'),
+                            background: rpcTimeMode === 'auto' ? 'rgba(168, 85, 247, 0.25)' : 'rgba(0,0,0,0.2)',
+                            color: rpcTimeMode === 'auto' ? '#fff' : 'var(--text-3)'
+                          }}
+                        >
+                          Otomatik
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setRpcTimeMode('custom')}
+                          style={{
+                            padding: '4px 6px',
+                            fontSize: '0.68rem',
+                            fontWeight: 600,
+                            borderRadius: 4,
+                            cursor: 'pointer',
+                            border: '1px solid ' + (rpcTimeMode === 'custom' ? '#a855f7' : 'rgba(255,255,255,0.1)'),
+                            background: rpcTimeMode === 'custom' ? 'rgba(168, 85, 247, 0.25)' : 'rgba(0,0,0,0.2)',
+                            color: rpcTimeMode === 'custom' ? '#fff' : 'var(--text-3)'
+                          }}
+                        >
+                          Özel Saat
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setRpcTimeMode('off')}
+                          style={{
+                            padding: '4px 6px',
+                            fontSize: '0.68rem',
+                            fontWeight: 600,
+                            borderRadius: 4,
+                            cursor: 'pointer',
+                            border: '1px solid ' + (rpcTimeMode === 'off' ? '#a855f7' : 'rgba(255,255,255,0.1)'),
+                            background: rpcTimeMode === 'off' ? 'rgba(168, 85, 247, 0.25)' : 'rgba(0,0,0,0.2)',
+                            color: rpcTimeMode === 'off' ? '#fff' : 'var(--text-3)'
+                          }}
+                        >
+                          Gizle
+                        </button>
+                      </div>
+
+                      {rpcTimeMode === 'custom' && (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 4 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                            <span style={{ fontSize: '0.7rem', color: 'var(--text-3)', whiteSpace: 'nowrap' }}>Geçen Süre (Saat):</span>
+                            <input
+                              type="number"
+                              min="0"
+                              max="999999"
+                              value={rpcCustomHours}
+                              onChange={e => setRpcCustomHours(Math.max(0, Number(e.target.value) || 0))}
+                              placeholder="290"
+                              style={{ flex: 1, padding: '4px 8px', fontSize: '0.75rem', textAlign: 'center', color: '#c084fc', fontWeight: 700 }}
+                            />
+                            <span style={{ fontSize: '0.7rem', color: '#a855f7', fontWeight: 600 }}>saat önce</span>
+                          </div>
+                          <div style={{ display: 'flex', gap: 4, justifyContent: 'flex-end' }}>
+                            <button
+                              type="button"
+                              onClick={() => setRpcCustomHours(prev => (Number(prev) || 0) + 10)}
+                              style={{ padding: '2px 6px', fontSize: '0.65rem', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', borderRadius: 4, cursor: 'pointer' }}
+                            >
+                              +10s
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setRpcCustomHours(prev => (Number(prev) || 0) + 50)}
+                              style={{ padding: '2px 6px', fontSize: '0.65rem', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', borderRadius: 4, cursor: 'pointer' }}
+                            >
+                              +50s
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setRpcCustomHours(prev => (Number(prev) || 0) + 100)}
+                              style={{ padding: '2px 6px', fontSize: '0.65rem', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', borderRadius: 4, cursor: 'pointer' }}
+                            >
+                              +100s
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setRpcCustomHours(0)}
+                              style={{ padding: '2px 6px', fontSize: '0.65rem', background: 'rgba(239,68,68,0.15)', border: '1px solid rgba(239,68,68,0.3)', color: '#f87171', borderRadius: 4, cursor: 'pointer' }}
+                            >
+                              Sıfırla
+                            </button>
+                          </div>
+                        </div>
+                      )}
                     </div>
 
                     <button
